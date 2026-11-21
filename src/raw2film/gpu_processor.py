@@ -17,6 +17,7 @@ from spectral_film_lut.utils import create_lut
 from wgpu import TextureUsage, get_default_device
 
 from raw2film import effects
+from raw2film.color_processing import apply_smart_saturation
 from raw2film.effects import (
     chroma_nr_filter,
     compute_halation_kernel,
@@ -1114,6 +1115,7 @@ class GpuProcessor:
         projector_kelvin: int = 6500,
         shadow_comp: float = 0.0,
         sat_adjust: float = 1.0,
+        smart_saturation: float = 1.0,
         gamma_func: GAMMA_KEYS = "sRGB",
         inversion_gamma: float = 4.0,
         idealized_curve: bool = False,
@@ -1133,6 +1135,7 @@ class GpuProcessor:
             "projector_kelvin": projector_kelvin,
             "shadow_comp": shadow_comp,
             "sat_adjust": sat_adjust,
+            "smart_saturation": smart_saturation,
             "gamma_func": gamma_func,
             "inversion_gamma": inversion_gamma,
             "idealized_curve": idealized_curve,
@@ -1178,6 +1181,8 @@ class GpuProcessor:
             lut = np.array(lut, np.uint8)
             lut = lut.reshape(lut_shape)
             lut = (lut / 255.0).astype(np.float32)
+
+        lut = apply_smart_saturation(lut, smart_saturation)
 
         self._ensure_lut_3d(lut)
 
@@ -1716,6 +1721,7 @@ class GpuProcessor:
         projector_kelvin: int = 6500,
         shadow_comp: float = 0.0,
         sat_adjust: float = 1.0,
+        smart_saturation: float = 1.0,
         gamma_func: GAMMA_KEYS = "sRGB",
         exp_kelvin: int = 6500,
         tint: float = 0.0,
@@ -1836,6 +1842,7 @@ class GpuProcessor:
         projector_kelvin: int = 6500,
         shadow_comp: float = 0.0,
         sat_adjust: float = 1.0,
+        smart_saturation: float = 1.0,
         gamma_func: GAMMA_KEYS = "sRGB",
         exp_kelvin: int = 6500,
         tint: float = 0.0,
@@ -1896,6 +1903,7 @@ class GpuProcessor:
         projector_kelvin,
         shadow_comp,
         sat_adjust,
+        smart_saturation,
         gamma_func,
         exp_kelvin,
         tint,
@@ -1937,6 +1945,7 @@ class GpuProcessor:
             projector_kelvin,
             shadow_comp,
             sat_adjust,
+            smart_saturation,
             gamma_func,
             inversion_gamma,
             idealized_curve,

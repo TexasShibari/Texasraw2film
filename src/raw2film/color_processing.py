@@ -6,6 +6,90 @@ import numpy as np
 from spectral_film_lut.config import DEFAULT_DTYPE
 
 
+def apply_smart_saturation(rgb: np.ndarray, saturation: float) -> np.ndarray:
+    """Adjust saturation while preserving luminance and protecting skin tones."""
+    saturation = float(np.clip(saturation, 0.0, 2.0))
+    if saturation == 1.0:
+        return rgb
+
+    rgb = np.asarray(rgb)
+    channel_max = np.max(rgb, axis=-1)
+    channel_min = np.min(rgb, axis=-1)
+    channel_range = channel_max - channel_min
+    safe_range = np.where(channel_range > 0, channel_range, 1.0)
+    hue = np.select(
+        [
+            channel_max == rgb[..., 0],
+            channel_max == rgb[..., 1],
+            channel_max == rgb[..., 2],
+        ],
+        [
+            60.0 * np.mod((rgb[..., 1] - rgb[..., 2]) / safe_range, 6.0),
+            60.0 * ((rgb[..., 2] - rgb[..., 0]) / safe_range + 2.0),
+            60.0 * ((rgb[..., 0] - rgb[..., 1]) / safe_range + 4.0),
+        ],
+        default=0.0,
+    )
+    hsv_saturation = np.divide(
+        channel_range,
+        channel_max,
+        out=np.zeros_like(channel_range),
+        where=channel_max > 0,
+    )
+
+    skin_hue_weight = np.clip((hue - 5.0) / 10.0, 0.0, 1.0) * np.clip(
+        (55.0 - hue) / 15.0, 0.0, 1.0
+    )
+    skin_saturation_weight = np.clip((hsv_saturation - 0.08) / 0.12, 0.0, 1.0)
+    skin_saturation_weight *= np.clip((0.85 - hsv_saturation) / 0.25, 0.0, 1.0)
+    skin_protection = skin_hue_weight * skin_saturation_weight
+
+    red_distance = np.minimum(hue, 360.0 - hue)
+    red_weight = np.clip((30.0 - red_distance) / 20.0, 0.0, 1.0)
+    red_weight *= np.clip((hsv_saturation - 0.12) / 0.25, 0.0, 1.0)
+    red_weight *= 1.0 - skin_protection
+    saturation_response = 1.0 - 0.99 * skin_protection
+    if saturation > 1.0:
+        saturation_response += 0.25 * red_weight
+    requested_saturation = 1.0 + (saturation - 1.0) * saturation_response
+
+    linear_rgb = np.where(
+        rgb <= 0.04045,
+        rgb / 12.92,
+        ((rgb + 0.055) / 1.055) ** 2.4,
+    )
+    luminance_weights = np.array([0.2126, 0.7152, 0.0722], dtype=linear_rgb.dtype)
+    luminance = np.sum(
+        linear_rgb * luminance_weights, axis=-1, keepdims=True
+    )
+    chroma = linear_rgb - luminance
+
+    max_saturation = np.full_like(chroma, np.inf)
+    np.divide(
+        1.0 - luminance,
+        chroma,
+        out=max_saturation,
+        where=chroma > 0,
+    )
+    np.divide(
+        -luminance,
+        chroma,
+        out=max_saturation,
+        where=chroma < 0,
+    )
+    max_saturation = np.min(max_saturation, axis=-1, keepdims=True)
+    saturation_scale = np.maximum(
+        0.0, np.minimum(requested_saturation[..., np.newaxis], max_saturation)
+    )
+    adjusted = np.clip(luminance + chroma * saturation_scale, 0.0, 1.0)
+
+    return np.where(
+        adjusted <= 0.0031308,
+        12.92 * adjusted,
+        1.055 * np.maximum(adjusted, 0.0) ** (1.0 / 2.4) - 0.055,
+    )
+
+
 def XYZ_to_kelvin(XYZ):
     """Convert from CIE XYZ 1931 to the CCT in kelvin."""
     x = XYZ[0] / np.sum(XYZ)

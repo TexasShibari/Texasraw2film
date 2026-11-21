@@ -463,6 +463,7 @@ class MainWindow(QMainWindow):
             "white_clip": False,
             "white_balance": False,
             "sat_adjust": 1,
+            "smart_saturation": 1,
             "grain_sigma": 0.4,
             "gamma_func": "sRGB",
             "push_pull": 0.0,
@@ -1204,6 +1205,24 @@ class MainWindow(QMainWindow):
             tool_tip="Adjust the saturation in the display color space.",
         )
 
+        self.smart_saturation_slider = Slider(continuous=False)
+        self.smart_saturation_slider.setMinMaxTicks(
+            0, 2, 1, 100, default=self.dflt_prf_params["smart_saturation"]
+        )
+        self.smart_saturation_slider.set_color_gradient(
+            np.array([0.666, 0.0, 0.0]),
+            np.array([0.666, 0.25, 2.0]),
+            20,
+            False,
+        )
+        profile_settings_group.add_option(
+            self.smart_saturation_slider,
+            "Smart Saturation",
+            self.dflt_prf_params["smart_saturation"],
+            self.smart_saturation_slider.setValue,
+            tool_tip="Preserve skin tones and enrich reds while adjusting saturation.",
+        )
+
         self.color_masking = Slider(continuous=False)
         """
         How effective the orange color mask of the film is. Value of 1 perfectly
@@ -1497,6 +1516,9 @@ class MainWindow(QMainWindow):
         )
         self.saturation_slider.valueChanged.connect(
             lambda x: self.profile_changed(x, "sat_adjust")
+        )
+        self.smart_saturation_slider.valueChanged.connect(
+            lambda x: self.profile_changed(x, "smart_saturation")
         )
         self.color_masking.valueChanged.connect(
             lambda x: self.profile_changed(x, "color_masking")
@@ -2032,6 +2054,7 @@ class MainWindow(QMainWindow):
             "grain_sigma": self.grain_sigma.getValue(),
             "shadow_comp": self.shadow_comp.getValue(),
             "sat_adjust": self.saturation_slider.getValue(),
+            "smart_saturation": self.smart_saturation_slider.getValue(),
             "color_masking": self.color_masking.getValue(),
             "inversion_gamma": self.inversion_gamma.getValue(),
             "idealized_curve": self.idealized_curve.isChecked(),
@@ -2495,6 +2518,7 @@ class MainWindow(QMainWindow):
         self.print_selector.setCurrentText(profile_params["print_film"])
         self.shadow_comp.setValue(profile_params["shadow_comp"])
         self.saturation_slider.setValue(profile_params["sat_adjust"])
+        self.smart_saturation_slider.setValue(profile_params["smart_saturation"])
         self.color_masking.setValue(profile_params["color_masking"])
         self.inversion_gamma.setValue(profile_params["inversion_gamma"])
         self.idealized_curve.setChecked(profile_params["idealized_curve"])

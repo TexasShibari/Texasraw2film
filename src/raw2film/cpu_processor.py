@@ -12,6 +12,7 @@ from spectral_film_lut.xy_lut import apply_2d_lut
 from wgpu import get_default_device
 
 from raw2film import effects
+from raw2film.color_processing import apply_smart_saturation
 from raw2film.effects import add_canvas, chroma_nr_filter
 from raw2film.raw_conversion import CANVAS_MODES, crop_rotate_zoom, raw_to_linear
 from raw2film.utils import (
@@ -215,6 +216,7 @@ class CpuProcessor:
         projector_kelvin: int = 6500,
         shadow_comp: float = 0.0,
         sat_adjust: float = 1.0,
+        smart_saturation: float = 1.0,
         gamma_func: GAMMA_KEYS = "sRGB",
         inversion_gamma: float = 4.0,
         idealized_curve: bool = False,
@@ -234,6 +236,7 @@ class CpuProcessor:
             "projector_kelvin": projector_kelvin,
             "shadow_comp": shadow_comp,
             "sat_adjust": sat_adjust,
+            "smart_saturation": smart_saturation,
             "gamma_func": gamma_func,
             "inversion_gamma": inversion_gamma,
             "idealized_curve": idealized_curve,
@@ -280,6 +283,7 @@ class CpuProcessor:
             lut = lut.reshape(lut_shape)
             lut = (lut / 255.0).astype(np.float32)
 
+        lut = apply_smart_saturation(lut, smart_saturation)
         self.tex_lut_3d = lut
 
         self.output_param_dict = new_param_dict
@@ -299,6 +303,7 @@ class CpuProcessor:
         projector_kelvin: int = 6500,
         shadow_comp: float = 0.0,
         sat_adjust: float = 1.0,
+        smart_saturation: float = 1.0,
         gamma_func: GAMMA_KEYS = "sRGB",
         exp_kelvin: int = 6500,
         tint: float = 0.0,
@@ -376,6 +381,7 @@ class CpuProcessor:
             projector_kelvin,
             shadow_comp,
             sat_adjust,
+            smart_saturation,
             gamma_func,
             inversion_gamma,
             idealized_curve,
