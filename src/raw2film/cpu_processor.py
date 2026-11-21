@@ -80,6 +80,8 @@ class CpuProcessor:
         zoom: float,
         rotate_times: int,
         flip: bool,
+        pan_x: float = 0.0,
+        pan_y: float = 0.0,
         resolution: None | tuple[int, int] = None,
         half_size: bool = True,
         cache: bool = True,
@@ -97,6 +99,8 @@ class CpuProcessor:
             "zoom": zoom,
             "rotate_times": rotate_times,
             "flip": flip,
+            "pan_x": pan_x,
+            "pan_y": pan_y,
             "resolution": resolution,
             "half_size": half_size,
             "chroma_nr": chroma_nr,
@@ -114,7 +118,15 @@ class CpuProcessor:
             image = self.load_raw_image(src, cam, lens, half_size)
 
         image = crop_rotate_zoom(
-            image, frame_width, frame_height, rotation, zoom, rotate_times, flip
+            image,
+            frame_width,
+            frame_height,
+            rotation,
+            zoom,
+            rotate_times,
+            flip,
+            pan_x,
+            pan_y,
         )
 
         if chroma_nr:
@@ -304,6 +316,8 @@ class CpuProcessor:
         zoom: float = 1.0,
         rotate_times: int = 0,
         flip: bool = False,
+        pan_x: float = 0.0,
+        pan_y: float = 0.0,
         cam: str | None = None,
         lens: str | None = None,
         canvas_mode: CANVAS_MODES = "No",
@@ -319,6 +333,7 @@ class CpuProcessor:
         chroma_nr: int = 0,
         grain: int = 2,
         highlight_burn: float = 0.0,
+        red_burn: float = 0.0,
         burn_scale: float = 50.0,
         half_size: bool = True,
         cache: bool = True,
@@ -341,6 +356,8 @@ class CpuProcessor:
             zoom,
             rotate_times,
             flip,
+            pan_x,
+            pan_y,
             resolution,
             half_size,
             cache,
@@ -387,6 +404,8 @@ class CpuProcessor:
 
         if highlight_burn:
             image = effects.burn(image, negative_film, highlight_burn, burn_scale)
+        if red_burn:
+            image = effects.red_burn(image, negative_film, red_burn, burn_scale)
 
         if negative_film.density_measure != "bw":
             image @= self.color_masking_matrix.T

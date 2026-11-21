@@ -1,6 +1,7 @@
 struct Params {
     highlight_burn: f32,
     log_H_ref: f32,
+    red_only: f32,
 };
 
 fn safe_log10_vec3(v: vec3<f32>) -> vec3<f32> {
@@ -27,7 +28,13 @@ fn downsample_func(@builtin(global_invocation_id) id: vec3<u32>) {
     // 1. Convert sample to log exposure space before thresholding
     let log_color = safe_log10_vec3(linear_color.rgb);
 
-    let func_val = max(log_color.g - params_p1.log_H_ref, 0.0);
+    let threshold_channel = select(log_color.g, log_color.r, params_p1.red_only > 0.5);
+    var func_val = max(threshold_channel - params_p1.log_H_ref, 0.0);
+    if (params_p1.red_only > 0.5) {
+        let midtone_sigma = 0.75;
+        let distance = threshold_channel - params_p1.log_H_ref;
+        func_val = exp(-0.5 * distance * distance / (midtone_sigma * midtone_sigma));
+    }
 
     textureStore(lowres_mask_write, id.xy, vec4<f32>(func_val, 0.0, 0.0, 1.0));
 }
@@ -75,7 +82,14 @@ fn final_burn(@builtin(global_invocation_id) id: vec3<u32>) {
     let log_orig_rgb = safe_log10_vec3(orig_color.rgb);
 
     // Apply highlight burn subtraction in log space
-    let final_rgb = log_orig_rgb - (params_p2.highlight_burn * blur_accum);
+    var final_rgb = log_orig_rgb - (params_p2.highlight_burn * blur_accum);
+    if (params_p2.red_only > 0.5) {
+        final_rgb = vec3<f32>(
+            log_orig_rgb.r - (params_p2.highlight_burn * blur_accum),
+            log_orig_rgb.g,
+            log_orig_rgb.b
+        );
+    }
 
     textureStore(output_highres_write, id.xy, vec4<f32>(final_rgb, orig_color.a));
 }

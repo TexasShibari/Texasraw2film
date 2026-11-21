@@ -18,6 +18,11 @@ The interface is designed to be familiar for anyone who has used a raw editor be
   shortcut.
 - By default, a simplified render is activated for preview to make the software more
   responsive. Activate the full preview under view to see the full film characterisitcs.
+- Use **Quick export jpg** for a JPEG or **Quick export tiff** for a lossless,
+  LZW-compressed TIFF handoff to another editor. TIFF exports preserve the processed
+  pixels but are 8-bit, like the current processing output.
+- In the image preview, scroll to zoom toward the pointer and drag to pan. The zoom and
+  pan crop are applied to exports.
 
 ## Film Stock Selector
 

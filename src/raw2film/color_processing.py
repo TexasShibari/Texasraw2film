@@ -2,8 +2,6 @@
 Helper functions for color math.
 """
 
-import math
-
 import numpy as np
 from spectral_film_lut.config import DEFAULT_DTYPE
 
@@ -69,34 +67,48 @@ def encode_ARRILogC3(x):
 
 
 def calc_exposure(
-    rgb: np.ndarray, ref_exposure: float = 0.18, metadata: dict | None = None
-):
-    """Calculates exposure value of the rgb image."""
-    lum_mat = rgb[::2, ::2, 1]
+    rgb: np.ndarray,
+    ref_exposure: float = 0.18,
+    metadata: dict | None = None,
+    percentile: float = 75.0,
+    red_protect_percentile: float = 95.0,
+    red_safe_max: float = 0.92,
+) -> float:
+    """Exposure compensation based on a high percentile of green-channel luminance.
 
-    factor = 3
+    Uses a high percentile (default 75) so large dark areas do not dominate
+    the calculation. This keeps bright subjects from clipping on high-contrast scenes.
+    """
+    lum = rgb[::2, ::2, 1]
+    lum = np.clip(lum, 1e-6, 1.0)
+
+    # Optional very light bias from camera EXIF (can be removed if preferred)
+    bias = 0.0
     if metadata is not None:
-        if (
-            "EXIF:FNumber" in metadata
-            and metadata["EXIF:FNumber"]
-            and metadata["EXIF:FNumber"] != "undef"
-        ):
-            factor = (
-                metadata["EXIF:FNumber"] ** 2
-                / metadata["EXIF:ISO"]
-                / metadata["EXIF:ExposureTime"]
-            )
-        else:
-            factor = 4**2 / metadata["EXIF:ISO"] / metadata["EXIF:ExposureTime"]
-        factor = math.sqrt(factor) + 1
+        try:
+            iso = float(metadata.get("EXIF:ISO", 100))
+            exp_time = float(metadata.get("EXIF:ExposureTime", 1 / 125))
+            bias = np.log2(iso / 100) * 0.1 + np.log2(exp_time * 125) * 0.05
+        except (TypeError, ValueError):
+            bias = 0.0
 
-    log_lum = lum_mat ** (1 / factor)
-    average_exposure = log_lum.mean() ** factor
+    target_lum = np.percentile(lum, percentile)
+    if target_lum <= 1e-6:
+        return 0.0
 
-    # ref_exposure *= 65535
-    exp_comp = math.log2(ref_exposure / average_exposure)
+    exp_comp = np.log2(ref_exposure / target_lum) + bias
 
-    return exp_comp
+    red_lum = rgb[::2, ::2, 0]
+    red_lum = np.clip(red_lum, 1e-6, 1.0)
+    red_high = np.percentile(red_lum, red_protect_percentile)
+
+    predicted_red = red_high * (2**exp_comp)
+    red_to_green_ratio = red_high / target_lum
+    if predicted_red > red_safe_max and red_high > 1e-6 and red_to_green_ratio > 1.3:
+        max_allowed_comp = np.log2(red_safe_max / red_high)
+        exp_comp = min(exp_comp, max_allowed_comp)
+
+    return float(np.clip(exp_comp, -3.0, 3.0))
 
 
 def xyz_to_srgb(XYZ, M=None, output_uint8=True, clip=True, apply_matrix=True):

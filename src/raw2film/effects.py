@@ -2,9 +2,12 @@
 Image processing effects.
 """
 
+from __future__ import annotations
+
 import math
 from collections.abc import Callable
 from functools import lru_cache
+from typing import TYPE_CHECKING
 
 import cv2 as cv
 import lensfunpy
@@ -16,7 +19,8 @@ from spectral_film_lut.config import DEFAULT_DTYPE
 from spectral_film_lut.film_spectral import FilmSpectral
 from spectral_film_lut.grain_generation import generate_grain
 
-from raw2film.raw_conversion import CANVAS_MODES
+if TYPE_CHECKING:
+    from raw2film.raw_conversion import CANVAS_MODES
 
 
 def lens_correction(
@@ -74,7 +78,14 @@ def rotate(rgb: np.ndarray, degrees: float) -> np.ndarray:
     return rgb
 
 
-def crop_image(rgb: np.ndarray, zoom=1, aspect=1.5, flip=False) -> np.ndarray:
+def crop_image(
+    rgb: np.ndarray,
+    zoom=1,
+    aspect=1.5,
+    flip=False,
+    pan_x=0.0,
+    pan_y=0.0,
+) -> np.ndarray:
     """Crops rgb data to aspect ratio."""
     x, y, _ = rgb.shape
     if flip:
@@ -103,10 +114,15 @@ def crop_image(rgb: np.ndarray, zoom=1, aspect=1.5, flip=False) -> np.ndarray:
 
     if zoom > 1:
         x, y, _ = rgb.shape
-        zoom_factor = (zoom - 1) / (2 * zoom)
-        x = math.ceil(zoom_factor * x)
-        y = math.ceil(zoom_factor * y)
-        rgb = rgb[x:-x, y:-y, :]
+        crop_y = math.ceil(((zoom - 1) / (2 * zoom)) * x)
+        crop_x = math.ceil(((zoom - 1) / (2 * zoom)) * y)
+        start_y = round(crop_y * (np.clip(pan_y, -1, 1) + 1))
+        start_x = round(crop_x * (np.clip(pan_x, -1, 1) + 1))
+        rgb = rgb[
+            start_y : start_y + x - 2 * crop_y,
+            start_x : start_x + y - 2 * crop_x,
+            :,
+        ]
 
     return rgb
 
@@ -422,6 +438,35 @@ def burn(
         )
     else:
         image = image - highlight_burn_log10 * down_up_blur(image, burn_scale, func)
+
+    return image
+
+
+def red_burn(
+    image: np.ndarray,
+    negative_film: FilmSpectral,
+    red_burn: float,
+    burn_scale: float,
+):
+    """
+    Reduce midtone red log-exposure values for color film stocks.
+
+    The amount is interpreted in stops. Green and blue channels are unchanged.
+    """
+    if image.shape[-1] != 3 or negative_film.density_measure == "bw":
+        return image
+
+    midtone_sigma = 0.75
+
+    def func(x):
+        distance = x - negative_film.log_H_ref[0]
+        # Weight the reduction in log-exposure space, centered on middle gray.
+        return np.exp(-0.5 * (distance / midtone_sigma) ** 2)
+
+    red_burn_log10 = red_burn * np.log10(2)
+    image[..., 0:1] = image[..., 0:1] - red_burn_log10 * down_up_blur(
+        image[..., 0:1], burn_scale, func
+    )
 
     return image
 

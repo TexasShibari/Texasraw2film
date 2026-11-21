@@ -79,7 +79,11 @@ from raw2film.gui_objects import (
 )
 from raw2film.image_bar import ImageBar
 from raw2film.raw_conversion import raw_to_linear
-from raw2film.utils import add_metadata, generate_histogram, load_metadata
+from raw2film.utils import (
+    add_metadata,
+    generate_histogram,
+    load_metadata,
+)
 
 
 class MainWindow(QMainWindow):
@@ -93,6 +97,8 @@ class MainWindow(QMainWindow):
         super().__init__()
 
         self.flip = False
+        self._pan_drag_start = None
+        self._pan_drag_transform = None
         self.setWindowTitle(f"Raw2Film {__version__}")
         self.setStyleSheet(THEME)
 
@@ -220,6 +226,7 @@ class MainWindow(QMainWindow):
         sidebar_container_layout.addWidget(scroll_area)
 
         self.image = QRenderWidget(update_mode="ondemand")
+        self.image.installEventFilter(self)
         self.image.setSizePolicy(
             QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         )
@@ -316,6 +323,11 @@ class MainWindow(QMainWindow):
         self.save_image_button = QAction("Quick export jpg", self)
         self.save_image_button.triggered.connect(self.save_image_dialog)
         file_menu.addAction(self.save_image_button)
+        self.save_tiff_button = QAction("Quick export tiff", self)
+        self.save_tiff_button.triggered.connect(
+            lambda checked=False: self.save_image_dialog("TIFF")
+        )
+        file_menu.addAction(self.save_tiff_button)
         self.save_all_button = QAction("Export all images", self)
         self.save_all_button.triggered.connect(self.save_all_images)
         self.save_selected_button = QAction("Export selected images", self)
@@ -461,6 +473,8 @@ class MainWindow(QMainWindow):
         self.dflt_img_params = {
             "exp_comp": 0,
             "zoom": 1,
+            "pan_x": 0.0,
+            "pan_y": 0.0,
             "rotate_times": 0,
             "rotation": 0,
             "exp_kelvin": 6000,
@@ -469,6 +483,7 @@ class MainWindow(QMainWindow):
             "canvas_scale": 1.0,
             "canvas_ratio": 0.8,
             "highlight_burn": 0,
+            "red_burn": 0,
             "burn_scale": 50,
             "flip": False,
             "tint": 0,
@@ -802,6 +817,19 @@ class MainWindow(QMainWindow):
             "Inspired by the burn method in darkroom printing. Is applied in stops.\n"
             "(Shift+Up: increase)\n"
             "(Shift+Down: decrease)",
+        )
+        self.red_burn = Slider(continuous=False)
+        self.red_burn.setMinMaxTicks(
+            0, 4, 1, 20, default=self.dflt_img_params["red_burn"]
+        )
+        basic_settings_group.add_option(
+            self.red_burn,
+            "Red burn",
+            self.dflt_img_params["red_burn"],
+            self.red_burn.setValue,
+            tool_tip="Lower the red layer in bright areas. Reach uses the same "
+            "'Burn scale' as highlight burn. Applied in stops after the film "
+            "input LUT. Only affects color stocks.",
         )
         self.burn_scale = Slider(continuous=False)
         self.burn_scale.setMinMaxTicks(
@@ -1444,6 +1472,9 @@ class MainWindow(QMainWindow):
         self.highlight_burn.valueChanged.connect(
             lambda x: self.setting_changed(x, "highlight_burn")
         )
+        self.red_burn.valueChanged.connect(
+            lambda x: self.setting_changed(x, "red_burn")
+        )
         self.burn_scale.valueChanged.connect(
             lambda x: self.setting_changed(x, "burn_scale")
         )
@@ -1574,10 +1605,172 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(0, self.setup_exiftool)
 
     def eventFilter(self, watched, event):
-        if watched == self.image and event.type() == QEvent.Type.Resize:
-            self.parameter_changed()
+        if watched == self.image:
+            if event.type() == QEvent.Type.Resize:
+                self.parameter_changed()
+            elif event.type() == QEvent.Type.Wheel:
+                if self._zoom_preview_at(event.position(), event.angleDelta().y()):
+                    return True
+            elif (
+                event.type() == QEvent.Type.MouseButtonPress
+                and event.button() == Qt.MouseButton.LeftButton
+            ):
+                if self._begin_preview_pan(event.position()):
+                    return True
+            elif event.type() == QEvent.Type.MouseMove:
+                if (
+                    self._pan_drag_start is not None
+                    and event.buttons() & Qt.MouseButton.LeftButton
+                ):
+                    self._move_preview_pan(event.position())
+                    return True
+            elif event.type() == QEvent.Type.MouseButtonRelease:
+                if self._pan_drag_start is not None:
+                    self._pan_drag_start = None
+                    self._pan_drag_transform = None
+                    self.image.releaseMouse()
+                    self._refresh_pan_cursor()
+                    return True
 
         return super().eventFilter(watched, event)
+
+    def _preview_image_geometry(self):
+        src = self.image_bar.current_image()
+        if src is None:
+            return None
+
+        src_short = src.split("/")[-1]
+        image_params = self.setup_image_params(src_short, src)
+        profile_params = self.setup_profile_params(image_params["profile"], src)
+        aspect = float(profile_params["frame_width"]) / float(
+            profile_params["frame_height"]
+        )
+        if image_params.get("rotate_times", self.rotate_times) % 2:
+            aspect = 1 / aspect
+
+        widget_width = self.image.width()
+        widget_height = self.image.height()
+        if widget_width <= 0 or widget_height <= 0:
+            return None
+
+        if widget_width / widget_height > aspect:
+            display_height = widget_height
+            display_width = display_height * aspect
+            left = (widget_width - display_width) / 2
+            top = 0.0
+        else:
+            display_width = widget_width
+            display_height = display_width / aspect
+            left = 0.0
+            top = (widget_height - display_height) / 2
+
+        return left, top, display_width, display_height
+
+    def _get_view_transform(self):
+        src = self.image_bar.current_image()
+        if src is None:
+            return None
+        image_params = self.setup_image_params(src.split("/")[-1], src)
+        return (
+            float(image_params["zoom"]),
+            float(image_params.get("pan_x", 0.0)),
+            float(image_params.get("pan_y", 0.0)),
+        )
+
+    def _zoom_preview_at(self, position, wheel_delta):
+        if self.image_bar.current_image() is None:
+            return False
+        if wheel_delta == 0:
+            return False
+
+        geometry = self._preview_image_geometry()
+        transform = self._get_view_transform()
+        if geometry is None or transform is None:
+            return False
+
+        left, top, display_width, display_height = geometry
+        u = np.clip((position.x() - left) / display_width, 0.0, 1.0)
+        v = np.clip((position.y() - top) / display_height, 0.0, 1.0)
+        zoom, pan_x, pan_y = transform
+        steps = wheel_delta / 120
+        new_zoom = float(np.clip(round(zoom * (1.1**steps), 2), 1.0, 2.0))
+        if new_zoom == zoom:
+            return True
+
+        def anchored_pan(pan, coordinate):
+            old_center = 0.5 + pan * (1 - 1 / zoom) / 2
+            source_point = old_center + (coordinate - 0.5) / zoom
+            new_center = source_point - (coordinate - 0.5) / new_zoom
+            return float(
+                np.clip(2 * (new_center - 0.5) / (1 - 1 / new_zoom), -1.0, 1.0)
+            )
+
+        if new_zoom == 1:
+            pan_x = pan_y = 0.0
+        else:
+            pan_x = anchored_pan(pan_x, u)
+            pan_y = anchored_pan(pan_y, v)
+
+        self._set_view_transform(new_zoom, pan_x, pan_y)
+        return True
+
+    def _begin_preview_pan(self, position):
+        transform = self._get_view_transform()
+        geometry = self._preview_image_geometry()
+        if transform is None or geometry is None or transform[0] <= 1:
+            return False
+
+        self._pan_drag_start = (position.x(), position.y())
+        self._pan_drag_transform = (*transform, geometry[2], geometry[3])
+        self.image.setCursor(Qt.CursorShape.ClosedHandCursor)
+        self.image.grabMouse()
+        return True
+
+    def _move_preview_pan(self, position):
+        if self._pan_drag_start is None or self._pan_drag_transform is None:
+            return
+
+        zoom, pan_x, pan_y, display_width, display_height = self._pan_drag_transform
+        dx = position.x() - self._pan_drag_start[0]
+        dy = position.y() - self._pan_drag_start[1]
+        pan_x = float(np.clip(pan_x - 2 * dx / (display_width * (zoom - 1)), -1, 1))
+        pan_y = float(np.clip(pan_y - 2 * dy / (display_height * (zoom - 1)), -1, 1))
+        self._set_view_transform(zoom, pan_x, pan_y)
+
+    def _set_view_transform(self, zoom, pan_x, pan_y):
+        src = self.image_bar.current_image()
+        if src is None:
+            return
+
+        highlighted = self.image_bar.get_highlighted() or [src]
+        for image_path in highlighted:
+            src_short = image_path.split("/")[-1]
+            image_params = self.image_params.setdefault(src_short, {})
+            image_params.setdefault("profile", self.profile_selector.currentText())
+            image_params.setdefault("exp_kelvin", self.exp_wb.getValue())
+            image_params["zoom"] = zoom
+            image_params["pan_x"] = pan_x
+            image_params["pan_y"] = pan_y
+
+        self.zoom.blockSignals(True)
+        self.zoom.setValue(zoom, duration=0)
+        self.zoom.blockSignals(False)
+        self.sync_thumbnail_settings()
+        self._refresh_pan_cursor()
+        if time.time() - self.save_timer > 10:
+            self.quick_save()
+        self.parameter_changed(src)
+
+    def _refresh_pan_cursor(self):
+        if not hasattr(self, "image_bar"):
+            return
+        transform = self._get_view_transform()
+        if self._pan_drag_start is not None:
+            self.image.setCursor(Qt.CursorShape.ClosedHandCursor)
+        elif transform is not None and transform[0] > 1:
+            self.image.setCursor(Qt.CursorShape.OpenHandCursor)
+        else:
+            self.image.unsetCursor()
 
     def create_context(self):
         target_mode = "wgpu" if self.gpu_processing.isChecked() else "bitmap"
@@ -1867,6 +2060,11 @@ class MainWindow(QMainWindow):
     def _ensure_image_metadata(self, src_short, src=None, force=False):
         image_params = self.image_params.setdefault(src_short, {})
 
+        if src is None and hasattr(self, "image_bar"):
+            current = self.image_bar.current_image()
+            if current is not None and current.split("/")[-1] == src_short:
+                src = current
+
         if image_params.get("_metadata_checked") and not force:
             return image_params
 
@@ -1877,11 +2075,6 @@ class MainWindow(QMainWindow):
             if "lens_correction" not in image_params:
                 image_params["lens_correction"] = self.auto_lens_correct.isChecked()
             return image_params
-
-        if src is None and hasattr(self, "image_bar"):
-            current = self.image_bar.current_image()
-            if current is not None and current.split("/")[-1] == src_short:
-                src = current
 
         if src is not None:
             metadata = load_metadata(src)
@@ -2071,6 +2264,8 @@ class MainWindow(QMainWindow):
             )
         if key == "exp_kelvin":
             self.update_wb_mode(value)
+        if key == "zoom":
+            self._refresh_pan_cursor()
         self.sync_thumbnail_settings()
         self.parameter_changed()
 
@@ -2124,6 +2319,7 @@ class MainWindow(QMainWindow):
         set_safely(self.lens_selector, "setCurrentText", "lens")
 
         set_safely(self.highlight_burn, "setValue", "highlight_burn")
+        set_safely(self.red_burn, "setValue", "red_burn")
         set_safely(self.burn_scale, "setValue", "burn_scale")
 
         set_safely(self.chroma_nr, "setValue", "chroma_nr")
@@ -2132,6 +2328,7 @@ class MainWindow(QMainWindow):
             self.profile_selector.setCurrentText(image_params["profile"])
 
         self.sync_thumbnail_settings()
+        self._refresh_pan_cursor()
 
     def load_profile_params(self, profile=None):
         if profile is None:
@@ -2413,6 +2610,7 @@ class MainWindow(QMainWindow):
         move_raw = kwargs.get("move_raw", 0)
         quality = kwargs.get("quality", 100)
         close = kwargs.get("close", False)
+        export_format = kwargs.get("export_format", "JPEG")
 
         # 1. Determine relative folder directory paths
         path = "/".join(filename.split("/")[:-1])
@@ -2424,8 +2622,15 @@ class MainWindow(QMainWindow):
             path += metadata["EXIF:DateTimeOriginal"][:10].replace(":", "-") + "/"
 
         out_filename = filename.split("/")[-1]
-        if "." not in out_filename:
-            out_filename += ".jpg"
+        if export_format == "TIFF":
+            extension = ".tif"
+            valid_extensions = {".tif", ".tiff"}
+        else:
+            extension = ".jpg"
+            valid_extensions = {".jpg", ".jpeg"}
+        stem, suffix = os.path.splitext(out_filename)
+        if suffix.lower() not in valid_extensions:
+            out_filename = f"{stem if suffix else out_filename}{extension}"
 
         # 2. Handle Directory generation
         try:
@@ -2446,7 +2651,10 @@ class MainWindow(QMainWindow):
 
         full_output_path = os.path.join(path, out_filename)
         img = Image.fromarray(image)
-        img.save(full_output_path, "JPEG", quality=quality)
+        if export_format == "TIFF":
+            img.save(full_output_path, "TIFF", compression="tiff_lzw")
+        else:
+            img.save(full_output_path, "JPEG", quality=quality)
         add_metadata(
             self.et, full_output_path, metadata, exp_comp=processing_args["exp_comp"]
         )
@@ -2482,17 +2690,26 @@ class MainWindow(QMainWindow):
             image, (src, filename), metadata, processing_args, start, **kwargs
         )
 
-    def save_image_dialog(self):
+    def save_image_dialog(self, export_format="JPEG"):
         src = self.image_bar.current_image()
         if src is None:
             return
         filename = src.split("/")[-1].split(".")[0]
+        file_filter = (
+            "TIFF images (*.tif *.tiff)"
+            if export_format == "TIFF"
+            else "JPEG images (*.jpg *.jpeg)"
+        )
         filename, ok = QFileDialog.getSaveFileName(
-            self, "Choose output file", filename, "*.jpg"
+            self, "Choose output file", filename, file_filter
         )
         if ok:
             self.start_worker(
-                self.save_image, src=src, filename=filename, semaphore=False
+                self.save_image,
+                src=src,
+                filename=filename,
+                export_format=export_format,
+                semaphore=False,
             )
 
     def save_multiple_process(self, folder, filenames, **kwargs):

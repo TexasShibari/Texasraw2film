@@ -40,7 +40,7 @@ def raw_to_linear(src, half_size=True):
             gamma=(1, 1),
             output_bps=16,
             no_auto_bright=True,
-            use_camera_wb=False,
+            use_camera_wb=True,
             use_auto_wb=False,
             half_size=half_size,
             demosaic_algorithm=rawpy.DemosaicAlgorithm(2),
@@ -49,7 +49,6 @@ def raw_to_linear(src, half_size=True):
     rgb = rgb.astype(DEFAULT_DTYPE) / 65535.0
 
     rgb *= 2 ** calc_exposure(rgb, metadata=load_metadata(src))
-
     return rgb
 
 
@@ -61,12 +60,26 @@ def crop_rotate_zoom(
     zoom: float = 1.0,
     rotate_times: int = 0,
     flip: bool = False,
+    pan_x: float = 0.0,
+    pan_y: float = 0.0,
 ):
     """Apply cropping, rotation, and a zoom to an image."""
     image = effects.crop_image(image, 1, aspect=frame_width / frame_height, flip=flip)
     if rotation:
         image = effects.rotate(image, rotation)
-    image = effects.crop_image(image, zoom, aspect=frame_width / frame_height)
+    pan_by_rotation = (
+        (pan_x, pan_y),
+        (-pan_y, pan_x),
+        (-pan_x, -pan_y),
+        (pan_y, -pan_x),
+    )[rotate_times % 4]
+    image = effects.crop_image(
+        image,
+        zoom,
+        aspect=frame_width / frame_height,
+        pan_x=pan_by_rotation[0],
+        pan_y=pan_by_rotation[1],
+    )
     image = np.rot90(image, k=rotate_times)
 
     return image

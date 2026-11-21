@@ -224,6 +224,7 @@ class GpuProcessor:
         self.halation_param_dict = None
         self.grain_kernel_param_dict = None
         self.highlight_burn_param_dict = None
+        self.red_burn_param_dict = None
 
         self.pipeline_resolution = None
         self.output_resolution = None
@@ -585,7 +586,12 @@ class GpuProcessor:
         )
 
     def _ensure_highlight_burn(
-        self, log_H_ref: float, highlight_burn: float, lowres_w: int, lowres_h: int
+        self,
+        log_H_ref: float,
+        highlight_burn: float,
+        lowres_w: int,
+        lowres_h: int,
+        red_only: bool = False,
     ):
         """Set up highlight burn parameters."""
         self.tex_highlight_burn = self.device.create_texture(
@@ -598,7 +604,10 @@ class GpuProcessor:
 
         highlight_burn_log10 = highlight_burn * np.log10(2)
 
-        uniform_data = np.array([highlight_burn_log10, log_H_ref], dtype=np.float32)
+        uniform_data = np.array(
+            [highlight_burn_log10, log_H_ref, 1.0 if red_only else 0.0],
+            dtype=np.float32,
+        )
         self.buffer_highlight_burn = self.device.create_buffer_with_data(
             data=uniform_data,
             usage=wgpu.BufferUsage.UNIFORM,
@@ -710,6 +719,8 @@ class GpuProcessor:
         zoom: float,
         rotate_times: int,
         flip: bool,
+        pan_x: float = 0.0,
+        pan_y: float = 0.0,
         resolution: None | tuple[int, int] = None,
         half_size: bool = True,
         cache: bool = True,
@@ -731,6 +742,8 @@ class GpuProcessor:
             "zoom": zoom,
             "rotate_times": rotate_times,
             "flip": flip,
+            "pan_x": pan_x,
+            "pan_y": pan_y,
             "resolution": resolution,
             "half_size": half_size,
             "chroma_nr": chroma_nr,
@@ -753,6 +766,8 @@ class GpuProcessor:
             zoom,
             rotate_times,
             flip,
+            pan_x,
+            pan_y,
             resolution,
             half_size,
             cache,
@@ -779,6 +794,8 @@ class GpuProcessor:
         zoom=1.0,
         rotate_times=0,
         flip=False,
+        pan_x=0.0,
+        pan_y=0.0,
         resolution=None,
         half_size=True,
         cache=True,
@@ -799,7 +816,15 @@ class GpuProcessor:
             else self.load_raw_image(src, cam, lens, half_size)
         )
         image = crop_rotate_zoom(
-            image, frame_width, frame_height, rotation, zoom, rotate_times, flip
+            image,
+            frame_width,
+            frame_height,
+            rotation,
+            zoom,
+            rotate_times,
+            flip,
+            pan_x,
+            pan_y,
         )
 
         if chroma_nr:
@@ -933,6 +958,33 @@ class GpuProcessor:
         self._ensure_highlight_burn(log_H_ref, highlight_burn, lowres_w, lowres_h)
 
         self.highlight_burn_param_dict = new_param_dict
+
+    def load_red_burn(
+        self, negative_film: FilmSpectral, red_burn: float, burn_scale: float
+    ):
+        """Create red-only burn parameters and upload them to the GPU."""
+        log_H_ref = negative_film.log_H_ref[
+            0 if len(negative_film.log_H_ref) > 0 else 0
+        ]
+
+        scale_factor = math.ceil(min(self.pipeline_resolution) / burn_scale)
+        lowres_w = max(1, self.pipeline_resolution[0] // scale_factor)
+        lowres_h = max(1, self.pipeline_resolution[1] // scale_factor)
+
+        new_param_dict = {
+            "log_H_ref": log_H_ref,
+            "red_burn": red_burn,
+            "lowres_w": lowres_w,
+            "lowres_h": lowres_h,
+        }
+
+        if new_param_dict == self.red_burn_param_dict:
+            return
+
+        self._ensure_highlight_burn(
+            log_H_ref, red_burn, lowres_w, lowres_h, red_only=True
+        )
+        self.red_burn_param_dict = new_param_dict
 
     def load_input_lut(
         self,
@@ -1653,6 +1705,8 @@ class GpuProcessor:
         zoom: float = 1.0,
         rotate_times: int = 0,
         flip: bool = False,
+        pan_x: float = 0.0,
+        pan_y: float = 0.0,
         cam: str | None = None,
         lens: str | None = None,
         canvas_mode: CANVAS_MODES = "No",
@@ -1668,6 +1722,7 @@ class GpuProcessor:
         chroma_nr: int = 0,
         grain: int = 2,
         highlight_burn: float = 0.0,
+        red_burn: float = 0.0,
         burn_scale: float = 50.0,
         half_size: bool = True,
         cache: bool = True,
@@ -1687,6 +1742,8 @@ class GpuProcessor:
             zoom,
             rotate_times,
             flip,
+            pan_x,
+            pan_y,
             resolution,
             half_size,
             cache,
@@ -1710,6 +1767,8 @@ class GpuProcessor:
             "zoom",
             "rotate_times",
             "flip",
+            "pan_x",
+            "pan_y",
             "canvas_mode",
             "canvas_scale",
             "canvas_ratio",
@@ -1769,6 +1828,7 @@ class GpuProcessor:
         sharpening_sigma: float = 1.0,
         grain: int = 2,
         highlight_burn: float = 0.0,
+        red_burn: float = 0.0,
         burn_scale: float = 50.0,
         color_masking: float | None = None,
         custom_inversion: bool = False,
@@ -1827,6 +1887,7 @@ class GpuProcessor:
         sharpening_sigma,
         grain,
         highlight_burn,
+        red_burn,
         burn_scale,
         color_masking,
         custom_inversion,
@@ -1895,6 +1956,14 @@ class GpuProcessor:
         # Highlight burn in log exposure space
         if highlight_burn:
             self.load_highlight_burn(negative_film, highlight_burn, burn_scale)
+            self._dispatch_highlight_burn(
+                ping_pong_tex[idx], ping_pong_tex[1 - idx], encoder=encoder
+            )
+            idx = 1 - idx
+
+        # Red burn in log exposure space for color stocks only
+        if red_burn and negative_film.density_measure != "bw":
+            self.load_red_burn(negative_film, red_burn, burn_scale)
             self._dispatch_highlight_burn(
                 ping_pong_tex[idx], ping_pong_tex[1 - idx], encoder=encoder
             )

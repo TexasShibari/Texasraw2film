@@ -87,7 +87,9 @@ def add_metadata(et, src, metadata, exp_comp):
     metadata = {
         key: metadata[key]
         for key in metadata
-        if key.startswith("EXIF") and key[5:] in data.METADATA_KEYS
+        if key.startswith("EXIF")
+        and key[5:] in data.METADATA_KEYS
+        and key[5:] != "Compression"
     }
     metadata["EXIF:ExposureCompensation"] = exp_comp
     et.set_tags([src], metadata, "-overwrite_original")
