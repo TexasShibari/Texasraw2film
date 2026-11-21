@@ -55,6 +55,38 @@ class CalcExposureTests(unittest.TestCase):
         expected = np.log2(0.92 / 0.70)
         self.assertAlmostEqual(result, float(expected), places=6)
 
+    def test_protects_elevated_blue_highlights(self):
+        rgb = np.zeros((8, 8, 3), dtype=np.float32)
+        rgb[:, :, 1] = 0.10
+        rgb[:, :, 2] = 0.80
+
+        result = calc_exposure(rgb)
+
+        expected = np.log2(0.92 / 0.80)
+        self.assertAlmostEqual(result, float(expected), places=6)
+
+    def test_clipped_pixels_limit_exposure_even_when_not_in_percentile(self):
+        rgb = np.zeros((100, 100, 3), dtype=np.float32)
+        rgb[:, :, 1] = 0.18
+        rgb[:, :, 0] = 0.60
+        rgb[:2, :, 0] = 1.0
+        rgb[:2, :, 1] = 1.0
+
+        result = calc_exposure(rgb)
+
+        self.assertLessEqual(result, np.log2(0.92 / 1.0) + 1e-6)
+
+    def test_flash_metadata_uses_more_conservative_headroom(self):
+        rgb = np.zeros((8, 8, 3), dtype=np.float32)
+        rgb[:, :, 1] = 0.18
+        rgb[:, :, 0] = 0.90
+
+        normal = calc_exposure(rgb)
+        flash = calc_exposure(rgb, metadata={"EXIF:Flash": "Flash fired"})
+
+        self.assertLess(flash, normal)
+        self.assertAlmostEqual(flash, np.log2(0.88 / 0.90), places=6)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -73,14 +73,25 @@ def calc_exposure(
     percentile: float = 75.0,
     red_protect_percentile: float = 95.0,
     red_safe_max: float = 0.92,
+    highlight_percentile: float = 99.0,
+    near_white_threshold: float = 0.92,
+    clip_threshold: float = 0.995,
+    clip_fraction_threshold: float = 0.001,
+    near_white_fraction_threshold: float = 0.005,
 ) -> float:
-    """Exposure compensation based on a high percentile of green-channel luminance.
+    """Calculate exposure while preserving highlight headroom in all RGB channels.
 
-    Uses a high percentile (default 75) so large dark areas do not dominate
-    the calculation. This keeps bright subjects from clipping on high-contrast scenes.
+    Midtone exposure is based on the green-channel percentile. After that estimate
+    is calculated, each channel is checked for elevated highlights, near-white
+    values, and clipped values. If a channel would be pushed beyond a safe
+    highlight level, the exposure compensation is capped.
     """
-    lum = rgb[::2, ::2, 1]
-    lum = np.clip(lum, 1e-6, 1.0)
+    rgb = np.asarray(rgb)
+    if rgb.ndim != 3 or rgb.shape[-1] != 3:
+        raise ValueError("rgb must be an array with shape (height, width, 3)")
+
+    sampled = rgb[::2, ::2]
+    lum = np.clip(sampled[..., 1], 1e-6, 1.0)
 
     # Optional very light bias from camera EXIF (can be removed if preferred)
     bias = 0.0
@@ -98,15 +109,51 @@ def calc_exposure(
 
     exp_comp = np.log2(ref_exposure / target_lum) + bias
 
-    red_lum = rgb[::2, ::2, 0]
-    red_lum = np.clip(red_lum, 1e-6, 1.0)
-    red_high = np.percentile(red_lum, red_protect_percentile)
+    flash_fired = False
+    if metadata is not None:
+        flash_value = metadata.get("EXIF:Flash", metadata.get("Flash"))
+        if isinstance(flash_value, (bool, np.bool_)):
+            flash_fired = bool(flash_value)
+        elif isinstance(flash_value, (int, np.integer)):
+            flash_fired = bool(flash_value & 0x01)
+        elif isinstance(flash_value, str):
+            value = flash_value.strip().lower()
+            flash_fired = "fired" in value and "did not" not in value
 
-    predicted_red = red_high * (2**exp_comp)
-    red_to_green_ratio = red_high / target_lum
-    if predicted_red > red_safe_max and red_high > 1e-6 and red_to_green_ratio > 1.3:
-        max_allowed_comp = np.log2(red_safe_max / red_high)
-        exp_comp = min(exp_comp, max_allowed_comp)
+    safe_max = red_safe_max
+    if flash_fired:
+        safe_max = min(safe_max, 0.88)
+
+    for channel in range(3):
+        channel_lum = np.clip(sampled[..., channel], 1e-6, 1.0)
+        protect_percentile = (
+            red_protect_percentile if channel == 0 else highlight_percentile
+        )
+        channel_high = np.percentile(channel_lum, protect_percentile)
+        if channel_high <= 1e-6:
+            continue
+
+        predicted_high = channel_high * (2**exp_comp)
+        channel_to_green_ratio = channel_high / target_lum
+        clipped_fraction = float(np.mean(channel_lum >= clip_threshold))
+        near_white_fraction = float(
+            np.mean(channel_lum >= near_white_threshold)
+        )
+
+        needs_guard = (
+            (
+                predicted_high > safe_max
+                or (flash_fired and channel_high > safe_max)
+            )
+            and (
+                channel_to_green_ratio > 1.3
+                or clipped_fraction >= clip_fraction_threshold
+                or near_white_fraction >= near_white_fraction_threshold
+            )
+        )
+        if needs_guard:
+            max_allowed_comp = np.log2(safe_max / channel_high)
+            exp_comp = min(exp_comp, max_allowed_comp)
 
     return float(np.clip(exp_comp, -3.0, 3.0))
 
