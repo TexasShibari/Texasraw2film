@@ -334,6 +334,7 @@ class CpuProcessor:
         grain: int = 2,
         highlight_burn: float = 0.0,
         red_burn: float = 0.0,
+        blue_burn: float = 0.0,
         burn_scale: float = 50.0,
         half_size: bool = True,
         cache: bool = True,
@@ -406,6 +407,8 @@ class CpuProcessor:
             image = effects.burn(image, negative_film, highlight_burn, burn_scale)
         if red_burn:
             image = effects.red_burn(image, negative_film, red_burn, burn_scale)
+        if blue_burn:
+            image = effects.blue_burn(image, negative_film, blue_burn, burn_scale)
 
         if negative_film.density_measure != "bw":
             image @= self.color_masking_matrix.T

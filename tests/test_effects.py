@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 import numpy as np
 
-from raw2film.effects import red_burn
+from raw2film.effects import blue_burn, red_burn
 
 
 class RedBurnTests(unittest.TestCase):
@@ -55,6 +55,37 @@ class RedBurnTests(unittest.TestCase):
 
         self.assertGreater(midtone_reduction, highlight_reduction)
         self.assertGreater(midtone_reduction, shadow_reduction)
+
+
+class BlueBurnTests(unittest.TestCase):
+    def test_reduces_only_blue_dominant_pixels(self):
+        image = np.ones((20, 20, 3), dtype=np.float32)
+        image[..., 0] = 0.4
+        image[..., 1] = 0.5
+        image[..., 2] = 1.0
+        negative_film = SimpleNamespace(density_measure="rgb")
+
+        result = blue_burn(image.copy(), negative_film, 1.0, 50)
+
+        self.assertTrue(np.all(result[..., 2] < image[..., 2]))
+        np.testing.assert_array_equal(result[..., 0], image[..., 0])
+        np.testing.assert_array_equal(result[..., 1], image[..., 1])
+
+    def test_does_nothing_for_balanced_pixels(self):
+        image = np.ones((20, 20, 3), dtype=np.float32)
+        negative_film = SimpleNamespace(density_measure="rgb")
+
+        result = blue_burn(image.copy(), negative_film, 1.0, 50)
+
+        np.testing.assert_array_equal(result, image)
+
+    def test_does_nothing_for_black_and_white(self):
+        image = np.ones((20, 20, 3), dtype=np.float32)
+        negative_film = SimpleNamespace(density_measure="bw")
+
+        result = blue_burn(image.copy(), negative_film, 1.0, 50)
+
+        np.testing.assert_array_equal(result, image)
 
 
 if __name__ == "__main__":

@@ -471,6 +471,31 @@ def red_burn(
     return image
 
 
+def blue_burn(
+    image: np.ndarray,
+    negative_film: FilmSpectral,
+    blue_burn: float,
+    burn_scale: float,
+):
+    """
+    Reduce blue-dominant log-exposure values for color film stocks.
+
+    The mask is strongest where blue exceeds red and green, leaving balanced
+    highlights such as neutral skin relatively unchanged.
+    """
+    if image.shape[-1] != 3 or negative_film.density_measure == "bw":
+        return image
+
+    blue_excess = image[..., 2] - np.maximum(image[..., 0], image[..., 1])
+    mask = np.clip((blue_excess - 0.05) / 0.15, 0.0, 1.0)
+    mask = down_up_blur(mask[..., np.newaxis], burn_scale)[..., 0:1]
+
+    blue_burn_log10 = blue_burn * np.log10(2)
+    image[..., 2:3] = image[..., 2:3] - blue_burn_log10 * mask
+
+    return image
+
+
 @njit
 def gaussian_kernel_1d(size: int, sigma: float) -> np.ndarray:
     """A fast 1D gaussian kernel."""

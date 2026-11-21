@@ -484,6 +484,7 @@ class MainWindow(QMainWindow):
             "canvas_ratio": 0.8,
             "highlight_burn": 0,
             "red_burn": 0,
+            "blue_burn": 0,
             "burn_scale": 50,
             "flip": False,
             "tint": 0,
@@ -830,6 +831,19 @@ class MainWindow(QMainWindow):
             tool_tip="Lower the red layer in bright areas. Reach uses the same "
             "'Burn scale' as highlight burn. Applied in stops after the film "
             "input LUT. Only affects color stocks.",
+        )
+        self.blue_burn = Slider(continuous=False)
+        self.blue_burn.setMinMaxTicks(
+            0, 4, 1, 20, default=self.dflt_img_params["blue_burn"]
+        )
+        basic_settings_group.add_option(
+            self.blue_burn,
+            "Blue burn",
+            self.dflt_img_params["blue_burn"],
+            self.blue_burn.setValue,
+            tool_tip="Lower blue-dominant areas while leaving neutral or balanced "
+            "colors unchanged. Reach uses the same 'Burn scale' as highlight "
+            "burn. Applied in stops after the film input LUT.",
         )
         self.burn_scale = Slider(continuous=False)
         self.burn_scale.setMinMaxTicks(
@@ -1475,6 +1489,9 @@ class MainWindow(QMainWindow):
         self.red_burn.valueChanged.connect(
             lambda x: self.setting_changed(x, "red_burn")
         )
+        self.blue_burn.valueChanged.connect(
+            lambda x: self.setting_changed(x, "blue_burn")
+        )
         self.burn_scale.valueChanged.connect(
             lambda x: self.setting_changed(x, "burn_scale")
         )
@@ -1642,8 +1659,9 @@ class MainWindow(QMainWindow):
         src_short = src.split("/")[-1]
         image_params = self.setup_image_params(src_short, src)
         profile_params = self.setup_profile_params(image_params["profile"], src)
-        aspect = float(profile_params["frame_width"]) / float(
-            profile_params["frame_height"]
+        aspect_params = {**profile_params, **self.image_params.get(src_short, {})}
+        aspect = float(aspect_params["frame_width"]) / float(
+            aspect_params["frame_height"]
         )
         if image_params.get("rotate_times", self.rotate_times) % 2:
             aspect = 1 / aspect
@@ -1954,6 +1972,7 @@ class MainWindow(QMainWindow):
                     ):
                         self.image_params[image]["profile"] = "Default"
             self.load_profile_params()
+            self.quick_save()
 
     def delete_all_profiles(self):
         reply = QMessageBox(self)
@@ -1988,15 +2007,105 @@ class MainWindow(QMainWindow):
                         ):
                             self.image_params[image]["profile"] = "Default"
             self.load_profile_params()
+            self.quick_save()
+
+    def _capture_live_profile_params(self):
+        """Capture the profile controls as an immutable profile snapshot."""
+        snapshot = {
+            **self.dflt_img_params,
+            **self.dflt_prf_params,
+            "negative_film": self.negative_selector.currentText(),
+            "print_film": self.print_selector.currentText(),
+            "red_light": self.red_light.getValue(),
+            "green_light": self.green_light.getValue(),
+            "blue_light": self.blue_light.getValue(),
+            "halation": self.halation.isChecked(),
+            "halation_size": self.halation_size.getValue(),
+            "halation_green_factor": self.halation_green.getValue(),
+            "halation_intensity": self.halation_intensity.getValue(),
+            "sharpness": self.sharpness.isChecked(),
+            "sharpening_strength": self.sharpening_strength.getValue(),
+            "sharpening_sigma": self.sharpening_sigma.getValue(),
+            "grain": self.grain.checkState().value,
+            "grain_size": self.grain_size.getValue(),
+            "grain_intensity": self.grain_intensity.getValue(),
+            "grain_sigma": self.grain_sigma.getValue(),
+            "shadow_comp": self.shadow_comp.getValue(),
+            "sat_adjust": self.saturation_slider.getValue(),
+            "color_masking": self.color_masking.getValue(),
+            "inversion_gamma": self.inversion_gamma.getValue(),
+            "idealized_curve": self.idealized_curve.isChecked(),
+            "white_clip": self.white_clip.isChecked(),
+            "white_balance": self.white_balance.isChecked(),
+            "push_pull": self.push_pull.getValue(),
+            "projector_kelvin": self.projector_kelvin.getValue(),
+            "exp_comp": self.exp_comp.getValue(),
+            "exp_kelvin": self.exp_wb.getValue(),
+            "zoom": self.zoom.getValue(),
+            "rotation": self.rotation.getValue(),
+            "canvas_mode": self.canvas_mode.currentText(),
+            "canvas_scale": self.canvas_scale.getValue(),
+            "highlight_burn": self.highlight_burn.getValue(),
+            "red_burn": self.red_burn.getValue(),
+            "blue_burn": self.blue_burn.getValue(),
+            "burn_scale": self.burn_scale.getValue(),
+            "chroma_nr": self.chroma_nr.getValue(),
+        }
+        snapshot["tint"] = self.tint.getValue()
+        snapshot["flip"] = self.flip
+        snapshot["rotate_times"] = self.rotate_times
+
+        current_image = self.image_bar.current_image()
+        if current_image:
+            current_params = self.image_params.get(
+                current_image.split("/")[-1], {}
+            )
+            for key in ("pan_x", "pan_y", "canvas_ratio"):
+                if key in current_params:
+                    snapshot[key] = current_params[key]
+
+        try:
+            snapshot["frame_width"] = float(self.frame_width.text())
+            snapshot["frame_height"] = float(self.frame_height.text())
+        except (TypeError, ValueError):
+            pass
+
+        return snapshot
 
     def add_profile_prompt(self):
         text, ok = QInputDialog.getText(self, "Add profile", "Profile name:")
         if ok:
-            self.profile_params[text] = self.profile_params[
-                self.profile_selector.currentText()
-            ].copy()
+            text = text.strip()
+            if not text or text == "Default":
+                return
+            if self.profile_selector.findText(text) != -1:
+                return
+
+            source_profile = self.profile_selector.currentText()
+            snapshot = {
+                **self.dflt_prf_params,
+                **self.profile_params.get(source_profile, {}),
+            }
+            snapshot.update(self._capture_live_profile_params())
+            snapshot.pop("profile", None)
+
+            current_image = self.image_bar.current_image()
+            if current_image:
+                current_params = self.image_params.get(
+                    current_image.split("/")[-1], {}
+                )
+                snapshot.update(
+                    {
+                        key: current_params[key]
+                        for key in snapshot
+                        if key in current_params
+                    }
+                )
+
+            self.profile_params[text] = snapshot
             self.profile_selector.addItem(text)
             self.profile_selector.setCurrentText(text)
+            self.quick_save()
 
     def format_changed(self, film_format: str):
         if film_format != "Custom" and not self.loading:
@@ -2194,11 +2303,7 @@ class MainWindow(QMainWindow):
                     self.format_selector.setCurrentText(format_name)
                 else:
                     self.format_selector.setCurrentText("Custom")
-        profile = self.profile_selector.currentText()
-        if profile not in self.profile_params:
-            self.profile_params[profile] = {}
-        self.profile_params[profile][key] = value
-        self.parameter_changed()
+        self.setting_changed(value, key)
 
     def quick_save(self):
         self.save_settings_system()
@@ -2285,8 +2390,16 @@ class MainWindow(QMainWindow):
             return self.dflt_prf_params
 
     def load_image_params(self, src, full_src=None):
-        image_params = self.setup_image_params(src, full_src)
-        self.ui_update.emit(image_params)
+        src_short = src.split("/")[-1]
+        image_params = self.image_params.get(src_short, {})
+        profile = image_params.get("profile", "Default")
+        ui_params = {
+            **self.dflt_img_params,
+            **self.dflt_prf_params,
+            **self.setup_profile_params(profile, full_src),
+            **image_params,
+        }
+        self.ui_update.emit(ui_params)
 
     def load_image_params_to_ui(self, image_params):
         def set_safely(widget, method_name, key):
@@ -2295,48 +2408,63 @@ class MainWindow(QMainWindow):
                 getattr(widget, method_name)(image_params[key])
                 widget.blockSignals(False)
 
-        # Use the helper to set values safely
-        set_safely(self.exp_comp, "setValue", "exp_comp")
-        set_safely(self.zoom, "setValue", "zoom")
+        was_loading = self.loading
+        self.loading = True
+        try:
+            profile = image_params.get("profile", "Default")
+            profile_selector_signals = self.profile_selector.blockSignals(True)
+            self.profile_selector.setCurrentText(profile)
+            self.profile_selector.blockSignals(profile_selector_signals)
 
-        if "rotate_times" in image_params:
-            self.rotate_times = image_params["rotate_times"]
+            self._apply_profile_params_to_ui(image_params)
 
-        if "flip" in image_params:
-            self.flip = image_params["flip"]
+            set_safely(self.exp_comp, "setValue", "exp_comp")
+            set_safely(self.zoom, "setValue", "zoom")
+            set_safely(self.rotation, "setValue", "rotation")
+            set_safely(self.exp_wb, "setValue", "exp_kelvin")
+            set_safely(self.tint, "setValue", "tint")
+            set_safely(self, "update_wb_mode", "exp_kelvin")
 
-        set_safely(self.rotation, "setValue", "rotation")
-        set_safely(self.exp_wb, "setValue", "exp_kelvin")
-        set_safely(self.tint, "setValue", "tint")
+            if "rotate_times" in image_params:
+                self.rotate_times = image_params["rotate_times"]
+            if "flip" in image_params:
+                self.flip = image_params["flip"]
 
-        set_safely(self, "update_wb_mode", "exp_kelvin")
-
-        set_safely(self.lens_correction, "setChecked", "lens_correction")
-        set_safely(self.canvas_mode, "setCurrentText", "canvas_mode")
-        set_safely(self.canvas_scale, "setValue", "canvas_scale")
-
-        set_safely(self.camera_selector, "setCurrentText", "cam")
-        set_safely(self.lens_selector, "setCurrentText", "lens")
-
-        set_safely(self.highlight_burn, "setValue", "highlight_burn")
-        set_safely(self.red_burn, "setValue", "red_burn")
-        set_safely(self.burn_scale, "setValue", "burn_scale")
-
-        set_safely(self.chroma_nr, "setValue", "chroma_nr")
-
-        if "profile" in image_params:
-            self.profile_selector.setCurrentText(image_params["profile"])
+            set_safely(self.lens_correction, "setChecked", "lens_correction")
+            set_safely(self.canvas_mode, "setCurrentText", "canvas_mode")
+            set_safely(self.canvas_scale, "setValue", "canvas_scale")
+            set_safely(self.camera_selector, "setCurrentText", "cam")
+            set_safely(self.lens_selector, "setCurrentText", "lens")
+            set_safely(self.highlight_burn, "setValue", "highlight_burn")
+            set_safely(self.red_burn, "setValue", "red_burn")
+            set_safely(self.blue_burn, "setValue", "blue_burn")
+            set_safely(self.burn_scale, "setValue", "burn_scale")
+            set_safely(self.chroma_nr, "setValue", "chroma_nr")
+        finally:
+            self.loading = was_loading
 
         self.sync_thumbnail_settings()
         self._refresh_pan_cursor()
 
-    def load_profile_params(self, profile=None):
-        if profile is None:
-            profile = self.profile_selector.currentText()
-        self.active = False
-        self.setting_changed(profile, "profile")
-        self.loading = True
-        profile_params = self.setup_profile_params(profile)
+    def _apply_profile_params_to_ui(self, profile_params):
+        self.exp_comp.setValue(profile_params["exp_comp"])
+        self.exp_wb.setValue(profile_params["exp_kelvin"])
+        self.update_wb_mode(profile_params["exp_kelvin"])
+        self.tint.setValue(profile_params["tint"])
+        self.zoom.setValue(profile_params["zoom"])
+        self.rotation.setValue(profile_params["rotation"])
+        self.canvas_mode.setCurrentText(profile_params["canvas_mode"])
+        self.canvas_scale.setValue(profile_params["canvas_scale"])
+        self.canvas_width.setText("1")
+        self.canvas_height.setText(str(profile_params["canvas_ratio"]))
+        self.highlight_burn.setValue(profile_params["highlight_burn"])
+        self.red_burn.setValue(profile_params["red_burn"])
+        self.blue_burn.setValue(profile_params["blue_burn"])
+        self.burn_scale.setValue(profile_params["burn_scale"])
+        self.chroma_nr.setValue(profile_params["chroma_nr"])
+        self.rotate_times = profile_params["rotate_times"]
+        self.flip = profile_params["flip"]
+
         self.red_light.setValue(profile_params["red_light"])
         self.green_light.setValue(profile_params["green_light"])
         self.blue_light.setValue(profile_params["blue_light"])
@@ -2348,17 +2476,18 @@ class MainWindow(QMainWindow):
         self.sharpening_strength.setValue(profile_params["sharpening_strength"])
         self.sharpening_sigma.setValue(profile_params["sharpening_sigma"])
         self.grain.setCheckState(Qt.CheckState(profile_params["grain"]))
-        if "frame_width" in profile_params:
-            self.frame_width.setText(str(profile_params["frame_width"]))
-        if "frame_height" in profile_params:
-            self.frame_height.setText(str(profile_params["frame_height"]))
-        if "frame_width" in profile_params and "frame_height" in profile_params:
-            dimensions = (profile_params["frame_width"], profile_params["frame_height"])
-            if dimensions in data.FORMATS.values():
-                format_name = list(data.FORMATS.keys())[
-                    list(data.FORMATS.values()).index(dimensions)
-                ]
-                self.format_selector.setCurrentText(format_name)
+        self.frame_width.setText(str(profile_params["frame_width"]))
+        self.frame_height.setText(str(profile_params["frame_height"]))
+
+        dimensions = (profile_params["frame_width"], profile_params["frame_height"])
+        if dimensions in data.FORMATS.values():
+            format_name = list(data.FORMATS.keys())[
+                list(data.FORMATS.values()).index(dimensions)
+            ]
+            self.format_selector.setCurrentText(format_name)
+        else:
+            self.format_selector.setCurrentText("Custom")
+
         self.grain_size.setValue(profile_params["grain_size"])
         self.grain_intensity.setValue(profile_params.get("grain_intensity", 1))
         self.grain_sigma.setValue(profile_params["grain_sigma"])
@@ -2370,13 +2499,44 @@ class MainWindow(QMainWindow):
         self.inversion_gamma.setValue(profile_params["inversion_gamma"])
         self.idealized_curve.setChecked(profile_params["idealized_curve"])
         self.white_clip.setChecked(profile_params["white_clip"])
-        self.white_balance.setCheckState(Qt.CheckState(profile_params["white_balance"]))
+        self.white_balance.setChecked(profile_params["white_balance"])
         self.push_pull.setValue(profile_params["push_pull"])
+        self.projector_kelvin.setValue(profile_params["projector_kelvin"])
 
-        if "projector_kelvin" in profile_params:
-            self.projector_kelvin.setValue(profile_params["projector_kelvin"])
-        self.loading = False
+    def load_profile_params(self, profile=None):
+        if profile is None:
+            profile = self.profile_selector.currentText()
+
+        self.active = False
+        self.loading = True
+        try:
+            selected_images = list(self.image_bar.get_highlighted())
+            current_image = self.image_bar.current_image()
+            if current_image and current_image not in selected_images:
+                selected_images.append(current_image)
+
+            profile_keys = set(self.dflt_prf_params) | (
+                set(self.dflt_img_params) - {"profile"}
+            )
+            for src in selected_images:
+                image_key = src.split("/")[-1]
+                image_params = self.image_params.setdefault(image_key, {})
+                image_params["profile"] = profile
+                for key in profile_keys:
+                    image_params.pop(key, None)
+
+            profile_params = {
+                **self.dflt_img_params,
+                **self.dflt_prf_params,
+                **self.setup_profile_params(profile),
+            }
+            self._apply_profile_params_to_ui(profile_params)
+        finally:
+            self.loading = False
+
         self.active = True
+        self.quick_save()
+        self.sync_thumbnail_settings()
         self.parameter_changed()
 
     def lights_changed(self, value):
@@ -2476,7 +2636,12 @@ class MainWindow(QMainWindow):
 
         image_args = self.setup_image_params(src_short, src)
         profile_args = self.setup_profile_params(image_args["profile"], src)
-        processing_args = {**self.dflt_prf_params, **image_args, **profile_args}
+        processing_args = {
+            **self.dflt_img_params,
+            **self.dflt_prf_params,
+            **profile_args,
+            **self.image_params[src_short],
+        }
 
         processing_args["negative_film"] = self.filmstocks[
             processing_args["negative_film"]
@@ -2546,13 +2711,14 @@ class MainWindow(QMainWindow):
         src_short = src.split("/")[-1]
 
         # Parameter extraction
-        image_args = (
-            self.setup_image_params(src_short, src)
-            if src_short in self.image_params
-            else self.dflt_img_params
-        )
+        image_args = self.setup_image_params(src_short, src)
         profile_args = self.setup_profile_params(image_args["profile"], src)
-        processing_args = {**self.dflt_prf_params, **image_args, **profile_args}
+        processing_args = {
+            **self.dflt_img_params,
+            **self.dflt_prf_params,
+            **profile_args,
+            **self.image_params.get(src_short, {}),
+        }
 
         # 2. Film stock resolution mappings
         processing_args["negative_film"] = self.filmstocks[
