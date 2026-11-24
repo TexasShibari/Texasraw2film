@@ -12,6 +12,7 @@ struct Uniforms {
     canvas_max_x: f32,
     canvas_max_y: f32,
     canvas_color: vec3<f32>,
+    preview_color: vec4<f32>,
 }
 @group(0) @binding(3) var<uniform> u_transforms: Uniforms;
 
@@ -44,7 +45,10 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         // Fill canvas with custom color and fully opaque alpha channel (1.0)
         color = vec4<f32>(u_transforms.canvas_color, 1.0);
     }
-    // 3. Otherwise, color defaults to transparent vec4(0.0) for everything else
+    // 3. Fill the preview letterbox, or preserve transparency for image exports.
+    else {
+        color = u_transforms.preview_color;
+    }
 
     let write_coords = vec2<i32>(i32(id.x), i32(id.y));
     textureStore(dst_tex, write_coords, color);

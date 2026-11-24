@@ -32,6 +32,8 @@ The interface is designed to be familiar for anyone who has used a raw editor be
   pixels but are 8-bit, like the current processing output.
 - In the image preview, scroll to zoom toward the pointer and drag to pan. The zoom and
   pan crop are applied to exports.
+- Right-click the image preview background to choose a proofing color. The selected
+  preview background is saved for the next launch.
 
 ## Film Stock Selector
 

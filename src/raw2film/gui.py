@@ -52,6 +52,7 @@ from PyQt6.QtWidgets import (
     QInputDialog,
     QLabel,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QProgressDialog,
     QScrollArea,
@@ -94,11 +95,110 @@ from raw2film.utils import (
 )
 
 
+UI_ACCENT = "#b29a78"
+PREVIEW_BACKGROUND_COLORS = {
+    "White": (255, 255, 255),
+    "Light gray": (224, 224, 224),
+    "Middle gray": (128, 128, 128),
+    "Dark gray": (64, 64, 64),
+    "Black": (0, 0, 0),
+}
+UI_THEME_OVERRIDE = f"""
+/* Slate surfaces give the image preview focus without flattening the panels. */
+QMainWindow > QWidget, QDialog > QWidget {{
+    background-color: #202326;
+    color: #d7d6d2;
+}}
+
+QWidget {{
+    color: #d7d6d2;
+    font-size: 9pt;
+}}
+
+QScrollArea {{
+    background-color: transparent;
+    border: none;
+    border-radius: {min(BORDER_RADIUS, 8)}px;
+}}
+
+QFrame#scroll {{
+    background-color: #1b1e20;
+    border: 1px solid #303539;
+    border-radius: {min(BORDER_RADIUS, 8)}px;
+}}
+
+/* Group headers read as quiet section bars, with the accent reserved for active. */
+SidebarGroup > QToolButton {{
+    background-color: #25292c;
+    border-bottom: 1px solid #34393d;
+    border-radius: {min(BORDER_RADIUS, 6)}px;
+    color: #e0dfdb;
+    font-weight: 600;
+    padding: 7px 8px;
+    text-align: left;
+}}
+
+SidebarGroup > QToolButton:hover {{
+    background-color: #2b3034;
+}}
+
+SidebarGroup > QToolButton:checked {{
+    color: {UI_ACCENT};
+}}
+
+QLineEdit {{
+    background-color: #1b1e20;
+    border: 1px solid #353a3e;
+    border-radius: 5px;
+    padding: 3px 5px;
+    selection-background-color: {UI_ACCENT};
+}}
+
+QLineEdit:hover {{
+    border-color: #4a5054;
+}}
+
+QLineEdit:focus {{
+    border-color: {UI_ACCENT};
+}}
+
+QComboBox, QPushButton {{
+    background-color: #25292c;
+    border: 1px solid #353a3e;
+    border-radius: 5px;
+    padding: 5px 7px;
+}}
+
+QComboBox:hover, QPushButton:hover {{
+    background-color: #2c3135;
+    border-color: #4a5054;
+}}
+
+QComboBox:focus, QPushButton:focus {{
+    border-color: {UI_ACCENT};
+}}
+"""
+
+
+def style_slider_widget(slider_widget):
+    """Apply the shared compact, warm-neutral treatment to a custom slider."""
+    slider = slider_widget.slider
+    slider.groove_thickness = 4
+    slider.handle_width = 16
+    slider.horizontal_padding = 8
+    slider.base_color = QColor("#25292c")
+    slider.handle_color = QColor(UI_ACCENT)
+    slider_widget.layout.setSpacing(9)
+    slider_widget.text.setFixedWidth(48)
+    slider.update()
+
+
 LINEAR_MASK_SLIDER_SPECS = (
     ("exp_comp", "Exposure", -3.0, 3.0, 0.0, False),
     ("exp_kelvin", "Kelvin", 2700.0, 16000.0, 6000.0, True),
     ("tint", "Tint", -1.0, 1.0, 0.0, False),
     ("highlight_burn", "Highlight burn", 0.0, 4.0, 0.0, False),
+    ("highlight_dodge", "Highlight dodge", 0.0, 4.0, 0.0, False),
     ("red_burn", "Red burn", 0.0, 4.0, 0.0, False),
     ("blue_burn", "Blue burn", 0.0, 4.0, 0.0, False),
     ("rotation", "Rotation angle", -90.0, 90.0, 0.0, False),
@@ -184,8 +284,10 @@ class MainWindow(QMainWindow):
         self.flip = False
         self._pan_drag_start = None
         self._pan_drag_transform = None
+        self.preview_background = "Black"
+        self.preview_bg_color = PREVIEW_BACKGROUND_COLORS[self.preview_background]
         self.setWindowTitle(f"Raw2Film {__version__}")
-        self.setStyleSheet(THEME)
+        self.setStyleSheet(THEME + UI_THEME_OVERRIDE)
 
         icon = QIcon()
         for size in [256, 128, 64, 48, 32, 16]:
@@ -281,6 +383,7 @@ class MainWindow(QMainWindow):
             return line
 
         basic_settings_group = SidebarGroup("Basic editing", self)
+        self.basic_settings_group = basic_settings_group
         side_layout.addWidget(basic_settings_group)
         side_layout.addWidget(create_line())
         profile_settings_group = SidebarGroup("Profile settings", self)
@@ -314,6 +417,7 @@ class MainWindow(QMainWindow):
 
         self.image = QRenderWidget(update_mode="ondemand")
         self.image.installEventFilter(self)
+        self._setup_preview_context_menu()
         self.image.setSizePolicy(
             QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         )
@@ -584,6 +688,7 @@ class MainWindow(QMainWindow):
             "canvas_scale": 1.0,
             "canvas_ratio": 0.8,
             "highlight_burn": 0,
+            "highlight_dodge": 0,
             "red_burn": 0,
             "blue_burn": 0,
             "burn_scale": 50,
@@ -621,6 +726,9 @@ class MainWindow(QMainWindow):
         )
         self.linear_gradient_buttons_layout.setContentsMargins(0, 0, 0, 0)
         self.linear_gradient_buttons_layout.setSpacing(2)
+        linear_gradient_buttons_widget.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred
+        )
         self.linear_gradient_buttons = []
         self.linear_gradient_button = self._create_linear_gradient_button(0)
         self.linear_gradient_add_button = AnimatedButton(parent=self)
@@ -935,6 +1043,19 @@ class MainWindow(QMainWindow):
             "Inspired by the burn method in darkroom printing. Is applied in stops.\n"
             "(Shift+Up: increase)\n"
             "(Shift+Down: decrease)",
+        )
+        self.highlight_dodge = Slider(continuous=False)
+        self.highlight_dodge.setMinMaxTicks(
+            0, 4, 1, 20, default=self.dflt_img_params["highlight_dodge"]
+        )
+        basic_settings_group.add_option(
+            self.highlight_dodge,
+            "Highlight dodge",
+            self.dflt_img_params["highlight_dodge"],
+            self.highlight_dodge.setValue,
+            tool_tip="Raise the brightness of bright areas (opposite of Highlight "
+            "burn). Reach can be configured under ‘Burn scale’ under ‘Advanced "
+            "printing techniques’. Applied in stops.",
         )
         self.red_burn = Slider(continuous=False)
         self.red_burn.setMinMaxTicks(
@@ -1491,7 +1612,7 @@ class MainWindow(QMainWindow):
         for index, (key, label, minimum, maximum, default, logarithmic) in enumerate(
             LINEAR_MASK_SLIDER_SPECS
         ):
-            group = mask_basic_group if index < 8 else mask_profile_group
+            group = mask_basic_group if index < 9 else mask_profile_group
             slider = (
                 SliderLog(continuous=False)
                 if logarithmic
@@ -1692,6 +1813,9 @@ class MainWindow(QMainWindow):
         self.highlight_burn.valueChanged.connect(
             lambda x: self.setting_changed(x, "highlight_burn")
         )
+        self.highlight_dodge.valueChanged.connect(
+            lambda x: self.setting_changed(x, "highlight_dodge")
+        )
         self.red_burn.valueChanged.connect(
             lambda x: self.setting_changed(x, "red_burn")
         )
@@ -1837,6 +1961,11 @@ class MainWindow(QMainWindow):
 
         self.et = None
 
+        for slider_widget in (
+            self.findChildren(Slider) + self.findChildren(SliderLog)
+        ):
+            style_slider_widget(slider_widget)
+
         QTimer.singleShot(0, self.setup_exiftool)
 
     def _new_linear_gradient(self):
@@ -1917,6 +2046,9 @@ class MainWindow(QMainWindow):
 
     def _create_linear_gradient_button(self, index):
         button = AnimatedButton(f"Linear Gradient {index + 1}", parent=self)
+        button.setSizePolicy(
+            QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred
+        )
         button.setCheckable(True)
         button.toggled.connect(
             lambda checked, item=index: self.select_linear_gradient(item, checked)
@@ -1949,6 +2081,7 @@ class MainWindow(QMainWindow):
             button.setChecked(checked)
             button.blockSignals(False)
 
+        self.basic_settings_group.update_animation()
         self._update_linear_gradient_visibility()
 
     def _update_linear_gradient_visibility(self):
@@ -2167,6 +2300,29 @@ class MainWindow(QMainWindow):
         self._refresh_gradient_overlay()
         self._mask_preview_timer.start()
 
+    def _setup_preview_context_menu(self):
+        self.image.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.image.customContextMenuRequested.connect(
+            self._show_preview_context_menu
+        )
+
+    def _show_preview_context_menu(self, position):
+        menu = QMenu(self)
+        for name in PREVIEW_BACKGROUND_COLORS:
+            menu.addAction(name)
+
+        selected = menu.exec(self.image.mapToGlobal(position))
+        if selected is not None:
+            self.set_preview_background(selected.text())
+
+    def set_preview_background(self, name):
+        if name not in PREVIEW_BACKGROUND_COLORS:
+            return
+        self.preview_background = name
+        self.preview_bg_color = PREVIEW_BACKGROUND_COLORS[name]
+        self.settings.setValue("preview_background", name)
+        self.parameter_changed()
+
     def eventFilter(self, watched, event):
         if watched == self.image:
             if event.type() == QEvent.Type.Resize:
@@ -2378,6 +2534,7 @@ class MainWindow(QMainWindow):
 
         self.image = QRenderWidget(update_mode="ondemand")
         self.image.installEventFilter(self)
+        self._setup_preview_context_menu()
         self.gradient_overlay = LinearGradientOverlay(
             self._linear_gradient_screen_points, self.image
         )
@@ -2627,6 +2784,7 @@ class MainWindow(QMainWindow):
             "canvas_mode": self.canvas_mode.currentText(),
             "canvas_scale": self.canvas_scale.getValue(),
             "highlight_burn": self.highlight_burn.getValue(),
+            "highlight_dodge": self.highlight_dodge.getValue(),
             "red_burn": self.red_burn.getValue(),
             "blue_burn": self.blue_burn.getValue(),
             "burn_scale": self.burn_scale.getValue(),
@@ -3018,6 +3176,7 @@ class MainWindow(QMainWindow):
             set_safely(self.camera_selector, "setCurrentText", "cam")
             set_safely(self.lens_selector, "setCurrentText", "lens")
             set_safely(self.highlight_burn, "setValue", "highlight_burn")
+            set_safely(self.highlight_dodge, "setValue", "highlight_dodge")
             set_safely(self.red_burn, "setValue", "red_burn")
             set_safely(self.blue_burn, "setValue", "blue_burn")
             set_safely(self.burn_scale, "setValue", "burn_scale")
@@ -3045,6 +3204,7 @@ class MainWindow(QMainWindow):
         self.canvas_width.setText("1")
         self.canvas_height.setText(str(profile_params["canvas_ratio"]))
         self.highlight_burn.setValue(profile_params["highlight_burn"])
+        self.highlight_dodge.setValue(profile_params["highlight_dodge"])
         self.red_burn.setValue(profile_params["red_burn"])
         self.blue_burn.setValue(profile_params["blue_burn"])
         self.burn_scale.setValue(profile_params["burn_scale"])
@@ -3197,7 +3357,9 @@ class MainWindow(QMainWindow):
         y_offset = (canvas_height - image_height) // 2
         x_offset = (canvas_width - image_width) // 2
 
-        canvas_rgba = np.zeros((canvas_height, canvas_width, 4), dtype=np.uint8)
+        canvas_rgba = np.empty((canvas_height, canvas_width, 4), dtype=np.uint8)
+        canvas_rgba[:, :, :3] = self.preview_bg_color
+        canvas_rgba[:, :, 3] = 255
 
         canvas_rgba[
             y_offset : y_offset + image_height, x_offset : x_offset + image_width, 0:3
@@ -3279,6 +3441,7 @@ class MainWindow(QMainWindow):
                     icc_transform=self.icc_transform,
                     dst_texture=self.image_context.get_current_texture(),
                     histogram_texture=self.histogram_context.get_current_texture(),
+                    preview_bg_color=self.preview_bg_color,
                     **processing_args,
                 )
             else:
@@ -3676,6 +3839,7 @@ class MainWindow(QMainWindow):
         quality_slider = Slider(continuous=False)
         quality_slider.setMinMaxTicks(0, 100)
         quality_slider.setValue(100)
+        style_slider_widget(quality_slider)
         layout.addWidget(QLabel("JPEG quality:"))
         layout.addWidget(quality_slider)
 
@@ -3890,6 +4054,11 @@ class MainWindow(QMainWindow):
         self.setting_changed(self.flip, "flip")
 
     def load_view_settings(self):
+        preview_background = self.settings.value("preview_background", None)
+        if preview_background in PREVIEW_BACKGROUND_COLORS:
+            self.preview_background = preview_background
+            self.preview_bg_color = PREVIEW_BACKGROUND_COLORS[preview_background]
+
         display_icc_path = self.settings.value("display_icc", None)
         softproof_icc_path = self.settings.value("softproof_icc", None)
         display_intent = self.settings.value("display_rendering_intent", "relative")

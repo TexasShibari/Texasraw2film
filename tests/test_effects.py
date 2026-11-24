@@ -3,7 +3,21 @@ from types import SimpleNamespace
 
 import numpy as np
 
-from raw2film.effects import blue_burn, red_burn
+from raw2film.effects import blue_burn, burn, red_burn
+
+
+class HighlightBurnTests(unittest.TestCase):
+    def test_signed_amounts_raise_or_lower_highlights(self):
+        image = np.full((20, 20, 3), 2.0, dtype=np.float32)
+        negative_film = SimpleNamespace(log_H_ref=np.array([0.0, 0.0, 0.0]))
+
+        burned = burn(image.copy(), negative_film, 1.0, 50)
+        dodged = burn(image.copy(), negative_film, -1.0, 50)
+        unchanged = burn(image.copy(), negative_film, 0.0, 50)
+
+        self.assertTrue(np.all(burned < image))
+        self.assertTrue(np.all(dodged > image))
+        np.testing.assert_array_equal(unchanged, image)
 
 
 class RedBurnTests(unittest.TestCase):

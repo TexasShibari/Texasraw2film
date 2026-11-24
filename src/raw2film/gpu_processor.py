@@ -1584,7 +1584,7 @@ class GpuProcessor:
         if submit_instantly:
             self.queue.submit([encoder.finish()])
 
-    def _bind_copy_to_dst(self, src_texture, dst_texture):
+    def _bind_copy_to_dst(self, src_texture, dst_texture, preview_bg_color=None):
         src_w, src_h, _ = src_texture.size
         dst_w, dst_h, _ = dst_texture.size
 
@@ -1643,6 +1643,12 @@ class GpuProcessor:
         c_r = raw_color[0] / 255.0 if max(raw_color) > 1.0 else float(raw_color[0])
         c_g = raw_color[1] / 255.0 if max(raw_color) > 1.0 else float(raw_color[1])
         c_b = raw_color[2] / 255.0 if max(raw_color) > 1.0 else float(raw_color[2])
+        if preview_bg_color is None:
+            preview_rgba = (0.0, 0.0, 0.0, 0.0)
+        else:
+            preview_rgba = tuple(channel / 255.0 for channel in preview_bg_color) + (
+                1.0,
+            )
 
         # 3. Calculate the actual rendering size of the physical texture image.
         if (
@@ -1670,7 +1676,7 @@ class GpuProcessor:
         scale_y = 1.0 / render_h
 
         transform_data = struct.pack(
-            "ffffffffffff",
+            "ffffffffffffffff",
             scale_x,
             scale_y,
             offset_x,
@@ -1683,6 +1689,7 @@ class GpuProcessor:
             c_g,
             c_b,
             0.0,
+            *preview_rgba,
         )
 
         uniform_buffer = self.device.create_buffer_with_data(
@@ -1761,6 +1768,7 @@ class GpuProcessor:
         chroma_nr: int = 0,
         grain: int = 2,
         highlight_burn: float = 0.0,
+        highlight_dodge: float = 0.0,
         red_burn: float = 0.0,
         blue_burn: float = 0.0,
         burn_scale: float = 50.0,
@@ -1769,6 +1777,7 @@ class GpuProcessor:
         color_masking: float | None = None,
         custom_inversion: bool = False,
         adaptive_blacks: float = 0.0,
+        preview_bg_color: tuple[int, int, int] | None = None,
         **kwargs,
     ):
         """Main function to load and process an image."""
@@ -1872,6 +1881,7 @@ class GpuProcessor:
         sharpening_sigma: float = 1.0,
         grain: int = 2,
         highlight_burn: float = 0.0,
+        highlight_dodge: float = 0.0,
         red_burn: float = 0.0,
         blue_burn: float = 0.0,
         burn_scale: float = 50.0,
@@ -1933,16 +1943,19 @@ class GpuProcessor:
         sharpening_sigma,
         grain,
         highlight_burn,
+        highlight_dodge,
         red_burn,
         blue_burn,
         burn_scale,
         color_masking,
         custom_inversion,
+        preview_bg_color=None,
     ):
         """Internal shared routine executing the WebGPU rendering pipeline passes."""
+        highlight_burn_amount = highlight_burn - highlight_dodge
         self.load_input_lut(negative_film, exp_kelvin, tint, exp_comp)
         self.load_density_curve_and_masking(
-            negative_film, push_pull, color_masking, not highlight_burn
+            negative_film, push_pull, color_masking, not highlight_burn_amount
         )
         self.load_output_lut(
             negative_film,
@@ -2002,8 +2015,10 @@ class GpuProcessor:
             idx = 1 - idx
 
         # Highlight burn in log exposure space
-        if highlight_burn:
-            self.load_highlight_burn(negative_film, highlight_burn, burn_scale)
+        if highlight_burn_amount:
+            self.load_highlight_burn(
+                negative_film, highlight_burn_amount, burn_scale
+            )
             self._dispatch_highlight_burn(
                 ping_pong_tex[idx], ping_pong_tex[1 - idx], encoder=encoder
             )
@@ -2090,6 +2105,7 @@ class GpuProcessor:
         binding, dst_size = self._bind_copy_to_dst(
             ping_pong_tex[idx].texture,
             dst_texture if dst_texture else self.tex_int_out.texture,
+            preview_bg_color=preview_bg_color if dst_texture is not None else None,
         )
         self._dispatch(
             self.pipeline_copy_to_int,

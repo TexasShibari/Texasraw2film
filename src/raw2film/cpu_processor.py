@@ -341,6 +341,7 @@ class CpuProcessor:
         chroma_nr: int = 0,
         grain: int = 2,
         highlight_burn: float = 0.0,
+        highlight_dodge: float = 0.0,
         red_burn: float = 0.0,
         blue_burn: float = 0.0,
         burn_scale: float = 50.0,
@@ -414,8 +415,11 @@ class CpuProcessor:
 
         log_clip(image)
 
-        if highlight_burn:
-            image = effects.burn(image, negative_film, highlight_burn, burn_scale)
+        highlight_burn_amount = highlight_burn - highlight_dodge
+        if highlight_burn_amount:
+            image = effects.burn(
+                image, negative_film, highlight_burn_amount, burn_scale
+            )
         if red_burn:
             image = effects.red_burn(image, negative_film, red_burn, burn_scale)
         if blue_burn:

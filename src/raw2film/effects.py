@@ -419,8 +419,8 @@ def burn(
     """
     Simulates highlight burning in the log exposure stage.
 
-    The burn amount is interpreted in stops: a value of 1.0 reduces fully burned
-    highlights by one stop, 2.0 by two stops, and so on.
+    The amount is interpreted in stops: positive values reduce fully burned
+    highlights, while negative values raise them.
     """
 
     def func(x):

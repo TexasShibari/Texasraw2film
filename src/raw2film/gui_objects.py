@@ -195,7 +195,6 @@ class SidebarGroup(QWidget):
         )
         self.toggle_button.setIcon(RIGHT_ARROW_ICON)
         self.toggle_button.pressed.connect(self.on_pressed)
-        self.toggle_button.setStyleSheet("background: transparent;")
         self.toggle_button.setIconSize(QSize(12, 12))
 
         self.toggle_animation = QParallelAnimationGroup(self)
@@ -203,7 +202,7 @@ class SidebarGroup(QWidget):
         self.content_area = QScrollArea(maximumHeight=0, minimumHeight=0)
         self.content_area.setContentsMargins(0, 0, 0, 0)
         self.content_area.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
         )
         self.content_area.setFrameShape(QFrame.Shape.NoFrame)
         self.content_layout = QGridLayout()
@@ -211,10 +210,13 @@ class SidebarGroup(QWidget):
         self.content_counter = -1
 
         layout = QVBoxLayout(self)
-        layout.setSpacing(0)
+        layout.setSpacing(4)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self.toggle_button)
         layout.addWidget(self.content_area)
+        self.content_layout.setContentsMargins(8, 6, 8, 8)
+        self.content_layout.setHorizontalSpacing(8)
+        self.content_layout.setVerticalSpacing(7)
 
         self.toggle_animation.addAnimation(QPropertyAnimation(self, b"minimumHeight"))
         self.toggle_animation.addAnimation(QPropertyAnimation(self, b"maximumHeight"))
@@ -225,11 +227,21 @@ class SidebarGroup(QWidget):
     def setChecked(self):
         self.toggle_button.setChecked(True)
         self.toggle_button.setIcon(DOWN_ARROW_ICON)
-        collapsed_height = self.sizeHint().height() - self.content_area.maximumHeight()
+        collapsed_height = self._collapsed_height()
         content_height = self.content_layout.sizeHint().height()
         self.setMinimumHeight(collapsed_height + content_height)
         self.setMaximumHeight(collapsed_height + content_height)
         self.content_area.setMaximumHeight(content_height)
+
+    def _collapsed_height(self):
+        layout = self.layout()
+        margins = layout.contentsMargins()
+        return (
+            self.toggle_button.sizeHint().height()
+            + layout.spacing()
+            + margins.top()
+            + margins.bottom()
+        )
 
     @pyqtSlot()
     def on_pressed(self):
@@ -258,7 +270,7 @@ class SidebarGroup(QWidget):
         self.update_animation()
 
     def update_animation(self):
-        collapsed_height = self.sizeHint().height() - self.content_area.maximumHeight()
+        collapsed_height = self._collapsed_height()
         content_height = self.content_layout.sizeHint().height()
         for i in range(self.toggle_animation.animationCount()):
             animation = self.toggle_animation.animationAt(i)
@@ -274,6 +286,8 @@ class SidebarGroup(QWidget):
         content_animation.setStartValue(0)
         content_animation.setEndValue(content_height)
         content_animation.setEasingCurve(QEasingCurve.Type.InOutCubic)
+        if self.toggle_button.isChecked():
+            self.setChecked()
 
 
 class ImageInfoWidget(QWidget):
