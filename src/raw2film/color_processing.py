@@ -6,6 +6,122 @@ import numpy as np
 from spectral_film_lut.config import DEFAULT_DTYPE
 
 
+def linear_gradient_weight(
+    shape: tuple[int, int],
+    start: tuple[float, float],
+    end: tuple[float, float],
+) -> np.ndarray:
+    """Return a smooth weight ramp from full effect at start to zero at end."""
+    height, width = shape
+    start_x, start_y = start
+    end_x, end_y = end
+    direction_x = end_x - start_x
+    direction_y = end_y - start_y
+    length_squared = direction_x * direction_x + direction_y * direction_y
+    if length_squared <= 1e-12:
+        return np.zeros((height, width), dtype=np.float32)
+
+    x = np.linspace(0.0, 1.0, width, dtype=np.float32)[np.newaxis, :]
+    y = np.linspace(0.0, 1.0, height, dtype=np.float32)[:, np.newaxis]
+    distance = (
+        (x - start_x) * direction_x + (y - start_y) * direction_y
+    ) / length_squared
+    t = np.clip(distance, 0.0, 1.0)
+    ramp = t * t * (3.0 - 2.0 * t)
+    return (1.0 - ramp).astype(np.float32, copy=False)
+
+
+def apply_linear_gradient_mask(
+    image: np.ndarray,
+    adjusted: np.ndarray,
+    gradient: dict,
+    base: np.ndarray | None = None,
+) -> np.ndarray:
+    """Blend a gradient layer, optionally adding its delta to an existing composite."""
+    image = np.asarray(image)
+    adjusted = np.asarray(adjusted)
+    if not gradient.get("enabled", True):
+        return image
+    if base is not None:
+        base = np.asarray(base)
+    if (
+        image.shape != adjusted.shape
+        or image.ndim != 3
+        or (base is not None and base.shape != image.shape)
+    ):
+        raise ValueError(
+            "image and adjusted must have the same (height, width, channels) shape"
+        )
+
+    weight = linear_gradient_weight(
+        image.shape[:2],
+        tuple(gradient["start"]),
+        tuple(gradient["end"]),
+    )[..., np.newaxis]
+    if base is None:
+        blended = image.astype(np.float32) * (1.0 - weight) + adjusted.astype(
+            np.float32
+        ) * weight
+    else:
+        blended = image.astype(np.float32) + (
+            adjusted.astype(np.float32) - base.astype(np.float32)
+        ) * weight
+    if np.issubdtype(image.dtype, np.integer):
+        blended = np.rint(blended)
+        blended = np.clip(
+            blended, np.iinfo(image.dtype).min, np.iinfo(image.dtype).max
+        )
+    return blended.astype(image.dtype, copy=False)
+
+
+def apply_adaptive_blacks(rgb: np.ndarray, amount: float) -> np.ndarray:
+    """Adjust linear RGB with a black-protecting lift and adaptive soft crush."""
+    amount = float(np.clip(amount, -100.0, 100.0))
+    if amount == 0.0:
+        return rgb
+
+    rgb = np.asarray(rgb)
+    if rgb.ndim != 3 or rgb.shape[-1] != 3:
+        raise ValueError("rgb must be an array with shape (height, width, 3)")
+
+    luminance = np.sum(
+        rgb * np.array([0.2126, 0.7152, 0.0722], dtype=rgb.dtype),
+        axis=-1,
+    )
+    strength = abs(amount) / 100.0
+
+    if amount > 0.0:
+        positive_luminance = np.maximum(luminance, 0.0)
+        lift_weight = np.divide(
+            positive_luminance,
+            positive_luminance + 0.02,
+        ) * np.exp(-positive_luminance / 0.5)
+        lift = 0.03 * strength * lift_weight
+        adjusted = rgb + lift[..., np.newaxis]
+    else:
+        sample_step = max(1, int(np.ceil(luminance.size / 65536)))
+        sampled_luminance = luminance.reshape(-1)[::sample_step]
+        positive_darks = sampled_luminance[sampled_luminance > 1e-6]
+        if positive_darks.size == 0:
+            return rgb
+
+        black_level = np.percentile(positive_darks, 5.0)
+        knee = max(0.25, 8.0 * black_level)
+        attenuation = 1.0 - 0.4 * strength * np.exp(
+            -np.maximum(luminance, 0.0) / knee
+        )
+        scale = np.divide(
+            np.maximum(luminance, 0.0),
+            luminance,
+            out=np.zeros_like(luminance),
+            where=luminance > 0.0,
+        )
+        scale *= attenuation
+        adjusted = rgb * scale[..., np.newaxis]
+
+    return adjusted.astype(rgb.dtype, copy=False)
+
+
 def apply_smart_saturation(rgb: np.ndarray, saturation: float) -> np.ndarray:
     """Adjust saturation while preserving luminance and protecting skin tones."""
     saturation = float(np.clip(saturation, 0.0, 2.0))

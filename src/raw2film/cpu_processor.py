@@ -12,7 +12,7 @@ from spectral_film_lut.xy_lut import apply_2d_lut
 from wgpu import get_default_device
 
 from raw2film import effects
-from raw2film.color_processing import apply_smart_saturation
+from raw2film.color_processing import apply_adaptive_blacks, apply_smart_saturation
 from raw2film.effects import add_canvas, chroma_nr_filter
 from raw2film.raw_conversion import CANVAS_MODES, crop_rotate_zoom, raw_to_linear
 from raw2film.utils import (
@@ -88,6 +88,7 @@ class CpuProcessor:
         cache: bool = True,
         chroma_nr: int = 0,
         max_scale: float | None = None,
+        adaptive_blacks: float = 0.0,
     ) -> tuple[int, int] | None:
         new_param_dict = {
             "src": src,
@@ -105,6 +106,7 @@ class CpuProcessor:
             "resolution": resolution,
             "half_size": half_size,
             "chroma_nr": chroma_nr,
+            "adaptive_blacks": adaptive_blacks,
         }
 
         if new_param_dict == self.image_param_dict:
@@ -147,6 +149,7 @@ class CpuProcessor:
 
             image = resolution_scaling(image, resolution)
 
+        image = apply_adaptive_blacks(image, adaptive_blacks)
         self.tex_input = np.ascontiguousarray(image)
 
         self.image_param_dict = new_param_dict
@@ -347,6 +350,7 @@ class CpuProcessor:
         custom_inversion: bool = False,
         max_scale: float | None = 400.0,
         grain_intensity: float = 1.0,
+        adaptive_blacks: float = 0.0,
         **_,
     ):
         """Main function to load and process an image."""
@@ -369,6 +373,7 @@ class CpuProcessor:
             cache,
             chroma_nr,
             max_scale,
+            adaptive_blacks,
         )
         self.load_input_lut(negative_film, exp_kelvin, tint, exp_comp)
         self.load_density_curve_and_masking(negative_film, push_pull, color_masking)

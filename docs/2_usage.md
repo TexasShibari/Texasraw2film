@@ -16,6 +16,15 @@ The interface is designed to be familiar for anyone who has used a raw editor be
 - Double-click on a settings label to reset to the default value.
 - Many shortcuts are available. Hover over a setting to see its description and
   shortcut.
+- **Adaptive Blacks** in Profile settings lifts darks and midtones while protecting
+  the black point when positive, and deepens the darkest levels when negative.
+- Choose a **Linear Gradient** button in Basic editing, then drag across the preview
+  to define the full-effect and zero-effect sides. Use the **+** button to add more
+  independent gradients. Drag either handle to reposition or rotate the selected
+  gradient. Use the eye button to temporarily hide or show its adjustments without
+  removing it. Each gradient's independent Basic and Profile settings are saved with
+  the image; select **Done** to return to global settings. Masked images use CPU
+  rendering even when GPU rendering is selected.
 - By default, a simplified render is activated for preview to make the software more
   responsive. Activate the full preview under view to see the full film characterisitcs.
 - Use **Quick export jpg** for a JPEG or **Quick export tiff** for a lossless,

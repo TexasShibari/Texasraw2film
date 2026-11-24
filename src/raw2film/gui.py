@@ -6,6 +6,7 @@ import json
 import os
 import shutil
 import time
+from copy import deepcopy
 from functools import lru_cache, partial
 from pathlib import Path
 
@@ -17,6 +18,7 @@ import wgpu
 from PIL import Image, ImageCms
 from PyQt6.QtCore import (
     QEvent,
+    QPointF,
     QRegularExpression,
     QSettings,
     QSize,
@@ -28,11 +30,16 @@ from PyQt6.QtCore import (
 )
 from PyQt6.QtGui import (
     QAction,
+    QColor,
     QIcon,
     QImage,
     QIntValidator,
     QKeySequence,
+    QPainter,
+    QPainterPath,
+    QPen,
     QRegularExpressionValidator,
+    QPixmap,
     QShortcut,
 )
 from PyQt6.QtWidgets import (
@@ -68,6 +75,7 @@ from spectral_film_lut.gui_objects import (
 )
 
 from raw2film import R2F_BASE_DIR, __version__, data, effects, utils
+from raw2film.color_processing import apply_linear_gradient_mask
 from raw2film.cpu_processor import CpuProcessor
 from raw2film.gpu_processor import GpuProcessor
 from raw2film.gui_objects import (
@@ -84,6 +92,83 @@ from raw2film.utils import (
     generate_histogram,
     load_metadata,
 )
+
+
+LINEAR_MASK_SLIDER_SPECS = (
+    ("exp_comp", "Exposure", -3.0, 3.0, 0.0, False),
+    ("exp_kelvin", "Kelvin", 2700.0, 16000.0, 6000.0, True),
+    ("tint", "Tint", -1.0, 1.0, 0.0, False),
+    ("highlight_burn", "Highlight burn", 0.0, 4.0, 0.0, False),
+    ("red_burn", "Red burn", 0.0, 4.0, 0.0, False),
+    ("blue_burn", "Blue burn", 0.0, 4.0, 0.0, False),
+    ("rotation", "Rotation angle", -90.0, 90.0, 0.0, False),
+    ("zoom", "Zoom", 1.0, 2.0, 1.0, False),
+    ("red_light", "Red printer light", -0.75, 0.75, 0.0, False),
+    ("green_light", "Green printer light", -0.75, 0.75, 0.0, False),
+    ("blue_light", "Blue printer light", -0.75, 0.75, 0.0, False),
+    ("push_pull", "Push/pull", -1.5, 1.5, 0.0, False),
+    ("projector_kelvin", "Projector WB", 2700.0, 16000.0, 6500.0, True),
+    ("inversion_gamma", "Gamma", 1.0, 5.0, 3.0, False),
+    ("sat_adjust", "Saturation", 0.0, 2.0, 1.0, False),
+    ("smart_saturation", "Smart Saturation", 0.0, 2.0, 1.0, False),
+    ("color_masking", "Color masking", 0.0, 2.0, 1.0, False),
+    ("shadow_comp", "Shadow comp.", -1.0, 1.0, 0.0, False),
+    ("adaptive_blacks", "Adaptive Blacks", -100.0, 100.0, 0.0, False),
+)
+
+
+def linear_gradient_visibility_icon(visible):
+    pixmap = QPixmap(24, 24)
+    pixmap.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    painter.setPen(QPen(QColor("#dedede"), 2))
+    painter.setBrush(Qt.BrushStyle.NoBrush)
+
+    eye = QPainterPath()
+    eye.moveTo(2, 12)
+    eye.cubicTo(7, 4, 17, 4, 22, 12)
+    eye.cubicTo(17, 20, 7, 20, 2, 12)
+    painter.drawPath(eye)
+
+    if visible:
+        painter.setPen(QPen(QColor("#dedede"), 1))
+        painter.setBrush(QColor("#dedede"))
+        painter.drawEllipse(QPointF(12, 12), 3, 3)
+    else:
+        painter.setPen(QPen(QColor("#dedede"), 2))
+        painter.drawLine(QPointF(4, 4), QPointF(20, 20))
+    painter.end()
+    return QIcon(pixmap)
+
+
+class LinearGradientOverlay(QWidget):
+    def __init__(self, point_provider, parent=None):
+        super().__init__(parent)
+        self.point_provider = point_provider
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+
+    def paintEvent(self, event):
+        points = self.point_provider()
+        if points is None:
+            return
+
+        start, end = points
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        painter.setPen(QPen(QColor(0, 0, 0, 190), 5))
+        painter.drawLine(QPointF(*start), QPointF(*end))
+        painter.setPen(QPen(QColor(255, 255, 255, 230), 2))
+        painter.drawLine(QPointF(*start), QPointF(*end))
+        for point, label in ((start, "1"), (end, "0")):
+            center = QPointF(*point)
+            painter.setBrush(QColor(30, 144, 255, 230))
+            painter.setPen(QPen(QColor(255, 255, 255), 2))
+            painter.drawEllipse(center, 8, 8)
+            painter.setPen(QPen(QColor(255, 255, 255), 1))
+            painter.drawText(center + QPointF(11, -9), label)
 
 
 class MainWindow(QMainWindow):
@@ -223,6 +308,8 @@ class MainWindow(QMainWindow):
         scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll_area.setWidget(sidebar_settings)
         scroll_area.setMinimumWidth(280)
+        self.sidebar_scroll_area = scroll_area
+        self.global_sidebar_settings = sidebar_settings
         sidebar_container_layout.addWidget(scroll_area)
 
         self.image = QRenderWidget(update_mode="ondemand")
@@ -233,6 +320,18 @@ class MainWindow(QMainWindow):
         self.image.setMinimumSize(QSize(256, 256))
         self.image_context = None
         self.context_mode = None
+        self.linear_gradient_panel_active = False
+        self.active_linear_gradient_index = 0
+        self._gradient_drag_handle = None
+        self.gradient_overlay = LinearGradientOverlay(
+            self._linear_gradient_screen_points, self.image
+        )
+        self.gradient_overlay.setGeometry(self.image.rect())
+        self.gradient_overlay.hide()
+        self._mask_preview_timer = QTimer(self)
+        self._mask_preview_timer.setSingleShot(True)
+        self._mask_preview_timer.setInterval(70)
+        self._mask_preview_timer.timeout.connect(self.parameter_changed)
 
         # Create placeholder widget with two buttons
         self.empty_placeholder = QWidget()
@@ -460,6 +559,7 @@ class MainWindow(QMainWindow):
             "idealized_curve": False,
             "halation_intensity": 1,
             "shadow_comp": 0,
+            "adaptive_blacks": 0,
             "white_clip": False,
             "white_balance": False,
             "sat_adjust": 1,
@@ -514,6 +614,22 @@ class MainWindow(QMainWindow):
             tool_tip="Select the profile specifying film and format parameters.\n"
             "(1-9: select profile)",
         )
+
+        linear_gradient_buttons_widget = QWidget(self)
+        self.linear_gradient_buttons_layout = QVBoxLayout(
+            linear_gradient_buttons_widget
+        )
+        self.linear_gradient_buttons_layout.setContentsMargins(0, 0, 0, 0)
+        self.linear_gradient_buttons_layout.setSpacing(2)
+        self.linear_gradient_buttons = []
+        self.linear_gradient_button = self._create_linear_gradient_button(0)
+        self.linear_gradient_add_button = AnimatedButton(parent=self)
+        self.linear_gradient_add_button.setObjectName("plus")
+        self.linear_gradient_add_button.setFixedWidth(25)
+        self.linear_gradient_buttons_layout.addWidget(
+            self.linear_gradient_add_button, alignment=Qt.AlignmentFlag.AlignLeft
+        )
+        basic_settings_group.add_option(linear_gradient_buttons_widget)
 
         self.lensfunpy_db = lensfunpy.Database()
         self.cameras = {
@@ -1330,6 +1446,77 @@ class MainWindow(QMainWindow):
             "darkened without crushing any details.",
         )
 
+        self.adaptive_blacks = Slider(continuous=False)
+        self.adaptive_blacks.setMinMaxTicks(-100, 100, 1, 100)
+        profile_settings_group.add_option(
+            self.adaptive_blacks,
+            "Adaptive Blacks",
+            self.dflt_prf_params["adaptive_blacks"],
+            self.adaptive_blacks.setValue,
+            tool_tip="Raises the overall image while protecting the black point "
+            "(positive) or deepens the darkest levels (negative). Strongest effect "
+            "through darks and midtones with fall-off toward highlights.",
+        )
+
+        self.linear_gradient_panel = QWidget(self)
+        mask_panel_layout = QVBoxLayout(self.linear_gradient_panel)
+        mask_panel_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        mask_panel_header = QHBoxLayout()
+        self.linear_gradient_title = QLabel("Linear Gradient 1", self)
+        mask_panel_header.addWidget(self.linear_gradient_title)
+        self.linear_gradient_visibility = AnimatedButton(
+            parent=self.linear_gradient_panel
+        )
+        self.linear_gradient_visibility.setCheckable(True)
+        self.linear_gradient_visibility.setIcon(
+            linear_gradient_visibility_icon(True)
+        )
+        self.linear_gradient_visibility.setIconSize(QSize(18, 18))
+        self.linear_gradient_visibility.setFixedSize(32, 28)
+        self.linear_gradient_visibility.setAccessibleName(
+            "Toggle linear gradient adjustments"
+        )
+        mask_panel_header.addWidget(self.linear_gradient_visibility)
+        self.linear_gradient_done = AnimatedButton("Done", parent=self)
+        mask_panel_header.addWidget(self.linear_gradient_done)
+        mask_panel_layout.addLayout(mask_panel_header)
+
+        self.linear_gradient_sliders = {}
+        mask_basic_group = SidebarGroup("Basic editing", self.linear_gradient_panel)
+        mask_profile_group = SidebarGroup(
+            "Profile settings", self.linear_gradient_panel
+        )
+        mask_panel_layout.addWidget(mask_basic_group)
+        mask_panel_layout.addWidget(mask_profile_group)
+        for index, (key, label, minimum, maximum, default, logarithmic) in enumerate(
+            LINEAR_MASK_SLIDER_SPECS
+        ):
+            group = mask_basic_group if index < 8 else mask_profile_group
+            slider = (
+                SliderLog(continuous=False)
+                if logarithmic
+                else Slider(continuous=False)
+            )
+            if logarithmic:
+                slider.setMinMaxSteps(minimum, maximum, 120, default, -2)
+            else:
+                slider.setMinMaxTicks(minimum, maximum, 1, 100, default)
+            group.add_option(slider, label, default, slider.setValue)
+            slider.valueChanged.connect(
+                lambda value, param=key: self._linear_gradient_parameter_changed(
+                    param, value
+                )
+            )
+            self.linear_gradient_sliders[key] = slider
+        mask_basic_group.setChecked()
+        mask_profile_group.setChecked()
+
+        self.linear_gradient_delete = AnimatedButton(
+            "Reset Gradient", parent=self.linear_gradient_panel
+        )
+        mask_panel_layout.addWidget(self.linear_gradient_delete)
+        mask_panel_layout.addStretch(1)
+
         # Helper Method
         def create_shortcut(key_sequence: str, func, name: str | None = None):
             shortcut = QShortcut(QKeySequence(key_sequence), self)
@@ -1558,6 +1745,15 @@ class MainWindow(QMainWindow):
         self.shadow_comp.valueChanged.connect(
             lambda x: self.profile_changed(x, "shadow_comp")
         )
+        self.adaptive_blacks.valueChanged.connect(
+            lambda x: self.profile_changed(x, "adaptive_blacks")
+        )
+        self.linear_gradient_add_button.clicked.connect(self.add_linear_gradient)
+        self.linear_gradient_visibility.toggled.connect(
+            self.toggle_linear_gradient_visibility
+        )
+        self.linear_gradient_done.clicked.connect(self.close_linear_gradient_panel)
+        self.linear_gradient_delete.clicked.connect(self.reset_linear_gradient)
         self.chroma_nr.valueChanged.connect(
             lambda x: self.setting_changed(x, "chroma_nr")
         )
@@ -1643,9 +1839,338 @@ class MainWindow(QMainWindow):
 
         QTimer.singleShot(0, self.setup_exiftool)
 
+    def _new_linear_gradient(self):
+        return {
+            "start": None,
+            "end": None,
+            "width": 0,
+            "height": 0,
+            "enabled": True,
+            "params": {
+                key: default
+                for key, _, _, _, default, _ in LINEAR_MASK_SLIDER_SPECS
+            },
+        }
+
+    def _linear_gradients_for_image(self, src=None, create=False):
+        if src is None:
+            src = self.image_bar.current_image()
+        if src is None:
+            return None
+
+        src_short = src.split("/")[-1]
+        image_params = self.image_params.get(src_short)
+        if image_params is None:
+            if not create:
+                return None
+            image_params = self.image_params.setdefault(src_short, {})
+
+        gradients = image_params.get("linear_gradients")
+        if gradients is None:
+            legacy_gradient = image_params.pop("linear_gradient", None)
+            gradients = [legacy_gradient] if legacy_gradient is not None else []
+            if gradients or create:
+                image_params["linear_gradients"] = gradients
+
+        for gradient in gradients:
+            gradient.setdefault("enabled", True)
+            gradient.setdefault("params", {})
+            for key, _, _, _, default, _ in LINEAR_MASK_SLIDER_SPECS:
+                gradient["params"].setdefault(key, default)
+        return gradients
+
+    def _linear_gradient_for_image(self, src=None, create=False, index=None):
+        if index is None:
+            index = self.active_linear_gradient_index
+        gradients = self._linear_gradients_for_image(src, create=create)
+        if gradients is None:
+            return None
+        if create:
+            while len(gradients) <= index:
+                gradients.append(self._new_linear_gradient())
+        if index >= len(gradients):
+            return None
+        return gradients[index]
+
+    @staticmethod
+    def _gradient_has_geometry(gradient):
+        if (
+            not gradient
+            or gradient.get("start") is None
+            or gradient.get("end") is None
+        ):
+            return False
+        start = np.asarray(gradient["start"], dtype=np.float32)
+        end = np.asarray(gradient["end"], dtype=np.float32)
+        return bool(np.sum((end - start) ** 2) > 1e-12)
+
+    def _has_linear_gradient(self, src=None, index=None):
+        gradients = self._linear_gradients_for_image(src)
+        if gradients is None:
+            return False
+        if index is not None:
+            return (
+                index < len(gradients)
+                and self._gradient_has_geometry(gradients[index])
+            )
+        return any(self._gradient_has_geometry(item) for item in gradients)
+
+    def _create_linear_gradient_button(self, index):
+        button = AnimatedButton(f"Linear Gradient {index + 1}", parent=self)
+        button.setCheckable(True)
+        button.toggled.connect(
+            lambda checked, item=index: self.select_linear_gradient(item, checked)
+        )
+        self.linear_gradient_buttons.append(button)
+        self.linear_gradient_buttons_layout.insertWidget(index, button)
+        return button
+
+    def _sync_linear_gradient_buttons(self):
+        gradients = self._linear_gradients_for_image()
+        count = max(1, len(gradients or []))
+        if self.active_linear_gradient_index >= count:
+            self.active_linear_gradient_index = count - 1
+        while len(self.linear_gradient_buttons) < count:
+            self._create_linear_gradient_button(len(self.linear_gradient_buttons))
+
+        for index, button in enumerate(self.linear_gradient_buttons):
+            in_use = index < count
+            gradient = gradients[index] if gradients and in_use else None
+            active = self._gradient_has_geometry(gradient)
+            checked = (
+                self.linear_gradient_panel_active
+                and index == self.active_linear_gradient_index
+            )
+            button.setText(
+                f"Linear Gradient {index + 1}" + (" (active)" if active else "")
+            )
+            button.setVisible(in_use)
+            button.blockSignals(True)
+            button.setChecked(checked)
+            button.blockSignals(False)
+
+        self._update_linear_gradient_visibility()
+
+    def _update_linear_gradient_visibility(self):
+        gradient = self._linear_gradient_for_image()
+        visible = gradient.get("enabled", True) if gradient else True
+        self.linear_gradient_visibility.blockSignals(True)
+        self.linear_gradient_visibility.setChecked(visible)
+        self.linear_gradient_visibility.blockSignals(False)
+        self.linear_gradient_visibility.setIcon(
+            linear_gradient_visibility_icon(visible)
+        )
+        self.linear_gradient_visibility.setToolTip(
+            "Hide localized adjustments"
+            if visible
+            else "Show localized adjustments"
+        )
+        self.linear_gradient_visibility.setEnabled(
+            self._gradient_has_geometry(gradient)
+        )
+
+    def _load_linear_gradient_controls(self):
+        self._sync_linear_gradient_buttons()
+        gradient = self._linear_gradient_for_image()
+        params = (
+            gradient["params"]
+            if gradient is not None
+            else {
+                key: default
+                for key, _, _, _, default, _ in LINEAR_MASK_SLIDER_SPECS
+            }
+        )
+        for key, slider in self.linear_gradient_sliders.items():
+            slider.blockSignals(True)
+            slider.setValue(params[key])
+            slider.blockSignals(False)
+        self.linear_gradient_title.setText(
+            f"Linear Gradient {self.active_linear_gradient_index + 1}"
+        )
+        self._refresh_gradient_overlay()
+
+    def select_linear_gradient(self, index, checked):
+        if not checked:
+            if (
+                self.linear_gradient_panel_active
+                and index == self.active_linear_gradient_index
+            ):
+                self.close_linear_gradient_panel()
+            return
+
+        self.active_linear_gradient_index = index
+        self._linear_gradient_for_image(create=True, index=index)
+        self.linear_gradient_panel_active = True
+        self._load_linear_gradient_controls()
+        self._set_sidebar_panel(self.linear_gradient_panel)
+        self._refresh_gradient_overlay()
+        self._refresh_pan_cursor()
+        self.parameter_changed()
+
+    def add_linear_gradient(self):
+        if self.image_bar.current_image() is None:
+            return
+        gradients = self._linear_gradients_for_image(create=True)
+        if not gradients:
+            self._linear_gradient_for_image(create=True, index=0)
+            gradients = self._linear_gradients_for_image()
+        index = len(gradients)
+        self._linear_gradient_for_image(create=True, index=index)
+        self.active_linear_gradient_index = index
+        self.linear_gradient_panel_active = True
+        self._load_linear_gradient_controls()
+        self._set_sidebar_panel(self.linear_gradient_panel)
+        self._refresh_gradient_overlay()
+        self._refresh_pan_cursor()
+        self._quick_save_linear_gradient_if_due()
+        self.parameter_changed()
+
+    def _set_sidebar_panel(self, panel):
+        if self.sidebar_scroll_area.widget() is not panel:
+            previous = self.sidebar_scroll_area.takeWidget()
+            if previous is not None:
+                previous.setParent(self)
+            self.sidebar_scroll_area.setWidget(panel)
+
+    def close_linear_gradient_panel(self):
+        self.linear_gradient_panel_active = False
+        self._sync_linear_gradient_buttons()
+        self._set_sidebar_panel(self.global_sidebar_settings)
+        self._refresh_gradient_overlay()
+        self._refresh_pan_cursor()
+        self.parameter_changed()
+
+    def _linear_gradient_parameter_changed(self, key, value):
+        if self.loading:
+            return
+        gradient = self._linear_gradient_for_image(create=True)
+        if gradient is None:
+            return
+        gradient["params"][key] = value
+        self._quick_save_linear_gradient_if_due()
+        self.parameter_changed()
+
+    def _quick_save_linear_gradient_if_due(self):
+        if time.time() - self.save_timer > 10:
+            self.quick_save()
+
+    def toggle_linear_gradient_visibility(self, visible):
+        gradient = self._linear_gradient_for_image()
+        if gradient is None:
+            return
+        gradient["enabled"] = bool(visible)
+        self._sync_linear_gradient_buttons()
+        self._quick_save_linear_gradient_if_due()
+        self.parameter_changed()
+
+    def reset_linear_gradient(self):
+        gradient = self._linear_gradient_for_image()
+        if gradient is None:
+            return
+        gradient["start"] = None
+        gradient["end"] = None
+        gradient["width"] = 0
+        gradient["height"] = 0
+        gradient["enabled"] = True
+        self._sync_linear_gradient_buttons()
+        self._refresh_gradient_overlay()
+        self._quick_save_linear_gradient_if_due()
+        self.sync_thumbnail_settings()
+        self.parameter_changed()
+
+    def _preview_image_position(self, position, clamp=False):
+        geometry = self._preview_image_geometry()
+        if geometry is None:
+            return None
+
+        left, top, display_width, display_height = geometry
+        u = (position.x() - left) / display_width
+        v = (position.y() - top) / display_height
+        if not clamp and not (0.0 <= u <= 1.0 and 0.0 <= v <= 1.0):
+            return None
+        return float(np.clip(u, 0.0, 1.0)), float(np.clip(v, 0.0, 1.0))
+
+    def _screen_from_gradient_point(self, point):
+        geometry = self._preview_image_geometry()
+        if geometry is None:
+            return None
+        left, top, display_width, display_height = geometry
+        return (
+            left + point[0] * display_width,
+            top + point[1] * display_height,
+        )
+
+    def _linear_gradient_screen_points(self):
+        if not self.linear_gradient_panel_active:
+            return None
+        gradient = self._linear_gradient_for_image()
+        if (
+            not self._has_linear_gradient(index=self.active_linear_gradient_index)
+            or gradient is None
+        ):
+            return None
+        start = self._screen_from_gradient_point(gradient["start"])
+        end = self._screen_from_gradient_point(gradient["end"])
+        return (start, end) if start is not None and end is not None else None
+
+    def _refresh_gradient_overlay(self):
+        if not hasattr(self, "gradient_overlay"):
+            return
+        self.gradient_overlay.setGeometry(self.image.rect())
+        self.gradient_overlay.setVisible(self.linear_gradient_panel_active)
+        self.gradient_overlay.raise_()
+        self.gradient_overlay.update()
+
+    def _begin_linear_gradient_drag(self, position):
+        point = self._preview_image_position(position)
+        if point is None:
+            return False
+
+        gradient = self._linear_gradient_for_image(create=True)
+        points = self._linear_gradient_screen_points()
+        if points is not None:
+            screen_point = (position.x(), position.y())
+            distances = [
+                (screen_point[0] - handle[0]) ** 2
+                + (screen_point[1] - handle[1]) ** 2
+                for handle in points
+            ]
+            if min(distances) <= 18**2:
+                self._gradient_drag_handle = int(np.argmin(distances))
+            else:
+                self._gradient_drag_handle = 1
+                gradient["start"] = list(point)
+                gradient["end"] = list(point)
+        else:
+            self._gradient_drag_handle = 1
+            gradient["start"] = list(point)
+            gradient["end"] = list(point)
+
+        if gradient["width"] <= 0 or gradient["height"] <= 0:
+            try:
+                width, height = self.image_context.physical_size
+            except AttributeError:
+                width, height = self.image.width(), self.image.height()
+            gradient["width"] = int(width)
+            gradient["height"] = int(height)
+        self.image.grabMouse()
+        self._refresh_gradient_overlay()
+        return True
+
+    def _move_linear_gradient_drag(self, position):
+        point = self._preview_image_position(position, clamp=True)
+        gradient = self._linear_gradient_for_image()
+        if point is None or gradient is None or self._gradient_drag_handle is None:
+            return
+        key = "start" if self._gradient_drag_handle == 0 else "end"
+        gradient[key] = list(point)
+        self._refresh_gradient_overlay()
+        self._mask_preview_timer.start()
+
     def eventFilter(self, watched, event):
         if watched == self.image:
             if event.type() == QEvent.Type.Resize:
+                self._refresh_gradient_overlay()
                 self.parameter_changed()
             elif event.type() == QEvent.Type.Wheel:
                 if self._zoom_preview_at(event.position(), event.angleDelta().y()):
@@ -1654,9 +2179,18 @@ class MainWindow(QMainWindow):
                 event.type() == QEvent.Type.MouseButtonPress
                 and event.button() == Qt.MouseButton.LeftButton
             ):
+                if self.linear_gradient_panel_active:
+                    if self._begin_linear_gradient_drag(event.position()):
+                        return True
                 if self._begin_preview_pan(event.position()):
                     return True
             elif event.type() == QEvent.Type.MouseMove:
+                if (
+                    self._gradient_drag_handle is not None
+                    and event.buttons() & Qt.MouseButton.LeftButton
+                ):
+                    self._move_linear_gradient_drag(event.position())
+                    return True
                 if (
                     self._pan_drag_start is not None
                     and event.buttons() & Qt.MouseButton.LeftButton
@@ -1669,6 +2203,13 @@ class MainWindow(QMainWindow):
                     self._pan_drag_transform = None
                     self.image.releaseMouse()
                     self._refresh_pan_cursor()
+                    return True
+                if self._gradient_drag_handle is not None:
+                    self._gradient_drag_handle = None
+                    self.image.releaseMouse()
+                    self._sync_linear_gradient_buttons()
+                    self._quick_save_linear_gradient_if_due()
+                    self._mask_preview_timer.start()
                     return True
 
         return super().eventFilter(watched, event)
@@ -1805,7 +2346,9 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "image_bar"):
             return
         transform = self._get_view_transform()
-        if self._pan_drag_start is not None:
+        if self.linear_gradient_panel_active:
+            self.image.setCursor(Qt.CursorShape.CrossCursor)
+        elif self._pan_drag_start is not None:
             self.image.setCursor(Qt.CursorShape.ClosedHandCursor)
         elif transform is not None and transform[0] > 1:
             self.image.setCursor(Qt.CursorShape.OpenHandCursor)
@@ -1813,7 +2356,13 @@ class MainWindow(QMainWindow):
             self.image.unsetCursor()
 
     def create_context(self):
-        target_mode = "wgpu" if self.gpu_processing.isChecked() else "bitmap"
+        target_mode = (
+            "bitmap"
+            if self.linear_gradient_panel_active or self._has_linear_gradient()
+            else "wgpu"
+            if self.gpu_processing.isChecked()
+            else "bitmap"
+        )
         if self.context_mode == target_mode:
             return
         self.context_mode = target_mode
@@ -1829,6 +2378,11 @@ class MainWindow(QMainWindow):
 
         self.image = QRenderWidget(update_mode="ondemand")
         self.image.installEventFilter(self)
+        self.gradient_overlay = LinearGradientOverlay(
+            self._linear_gradient_screen_points, self.image
+        )
+        self.gradient_overlay.setGeometry(self.image.rect())
+        self.gradient_overlay.setVisible(self.linear_gradient_panel_active)
 
         self.image_stack.insertWidget(1, self.image)
 
@@ -1888,6 +2442,7 @@ class MainWindow(QMainWindow):
             self.image_stack.setCurrentIndex(1)
         else:
             self.image_stack.setCurrentIndex(0)
+        self._refresh_gradient_overlay()
 
     def setup_exiftool(self):
         try:
@@ -1939,7 +2494,9 @@ class MainWindow(QMainWindow):
                     and "cam" in self.image_params[image_short]
                 ):
                     cam = self.image_params[image_short]["cam"]
-                self.image_params[image_short] = self.image_params[src_short].copy()
+                self.image_params[image_short] = deepcopy(
+                    self.image_params[src_short]
+                )
                 if lens is not None:
                     self.image_params[image_short]["lens"] = lens
                 if cam is not None:
@@ -2053,6 +2610,7 @@ class MainWindow(QMainWindow):
             "grain_intensity": self.grain_intensity.getValue(),
             "grain_sigma": self.grain_sigma.getValue(),
             "shadow_comp": self.shadow_comp.getValue(),
+            "adaptive_blacks": self.adaptive_blacks.getValue(),
             "sat_adjust": self.saturation_slider.getValue(),
             "smart_saturation": self.smart_saturation_slider.getValue(),
             "color_masking": self.color_masking.getValue(),
@@ -2179,6 +2737,7 @@ class MainWindow(QMainWindow):
 
     def load_image(self, src, **kwargs):
         self.image_stack.setCurrentWidget(self.image)
+        self.create_context()
         self.start_worker(self.load_image_process, src=src)
 
     def update_window_title(self, image_path: str | None = None):
@@ -2466,6 +3025,11 @@ class MainWindow(QMainWindow):
         finally:
             self.loading = was_loading
 
+        if self.linear_gradient_panel_active:
+            self._load_linear_gradient_controls()
+        else:
+            self._sync_linear_gradient_buttons()
+            self._refresh_gradient_overlay()
         self.sync_thumbnail_settings()
         self._refresh_pan_cursor()
 
@@ -2517,6 +3081,7 @@ class MainWindow(QMainWindow):
         self.negative_selector.setCurrentText(profile_params["negative_film"])
         self.print_selector.setCurrentText(profile_params["print_film"])
         self.shadow_comp.setValue(profile_params["shadow_comp"])
+        self.adaptive_blacks.setValue(profile_params["adaptive_blacks"])
         self.saturation_slider.setValue(profile_params["sat_adjust"])
         self.smart_saturation_slider.setValue(profile_params["smart_saturation"])
         self.color_masking.setValue(profile_params["color_masking"])
@@ -2697,7 +3262,18 @@ class MainWindow(QMainWindow):
             processing_args["grain"] = False
             processing_args["halation"] = False
         try:
-            if self.context_mode == "wgpu":
+            if self._has_linear_gradient(src):
+                image = self._process_with_linear_gradients(
+                    self.cpu_processor,
+                    src,
+                    processing_args,
+                    self._linear_gradients_for_image(src),
+                    icc_transform=self.icc_transform,
+                )
+                histogram = generate_histogram(image, height=80)
+                self.histogram_context.set_bitmap(histogram)
+                self.numpy_to_canvas(image, full_height, full_width)
+            elif self.context_mode == "wgpu":
                 self.gpu_processor.process(
                     src,
                     icc_transform=self.icc_transform,
@@ -2721,6 +3297,44 @@ class MainWindow(QMainWindow):
         self.histogram.request_draw()
         self.image.request_draw()
         self.image.setToolTip(src)
+
+    def _process_with_linear_gradients(
+        self, processor, src, processing_args, gradients, icc_transform=None
+    ):
+        base_args = dict(processing_args)
+        base = processor.process(src, icc_transform=icc_transform, **base_args)
+        composite = base
+        for gradient in gradients or []:
+            if (
+                not gradient.get("enabled", True)
+                or not self._gradient_has_geometry(gradient)
+            ):
+                continue
+
+            mask_params = gradient.get("params", {})
+            adjusted_args = dict(base_args)
+            has_local_adjustment = False
+            for key, _, minimum, maximum, neutral, _ in LINEAR_MASK_SLIDER_SPECS:
+                local_value = float(mask_params.get(key, neutral))
+                delta = local_value - neutral
+                if delta == 0.0:
+                    continue
+                global_value = float(adjusted_args.get(key, neutral))
+                adjusted_args[key] = float(
+                    np.clip(global_value + delta, minimum, maximum)
+                )
+                has_local_adjustment = True
+
+            if not has_local_adjustment:
+                continue
+
+            adjusted = processor.process(
+                src, icc_transform=icc_transform, **adjusted_args
+            )
+            composite = apply_linear_gradient_mask(
+                composite, adjusted, gradient, base=base
+            )
+        return composite
 
     def setup_image_params(self, src, full_src=None):
         src_short = src.split("/")[-1]
@@ -2868,13 +3482,22 @@ class MainWindow(QMainWindow):
             src, auto_lens_correct, kwargs.get("resolution")
         )
 
-        processor = (
-            self.gpu_processor
-            if self.gpu_processing.isChecked()
-            else self.cpu_processor
-        )
-
-        image = processor.process(src, half_size=False, cache=False, **processing_args)
+        if self._has_linear_gradient(src):
+            image = self._process_with_linear_gradients(
+                self.cpu_processor,
+                src,
+                {**processing_args, "half_size": False, "cache": False},
+                self._linear_gradients_for_image(src),
+            )
+        else:
+            processor = (
+                self.gpu_processor
+                if self.gpu_processing.isChecked()
+                else self.cpu_processor
+            )
+            image = processor.process(
+                src, half_size=False, cache=False, **processing_args
+            )
 
         return self._export_processed_image(
             image, (src, filename), metadata, processing_args, start, **kwargs
@@ -2919,7 +3542,8 @@ class MainWindow(QMainWindow):
         self.progress_dialog.show()
         QApplication.processEvents()
 
-        use_gpu = self.gpu_processing.isChecked()
+        has_masked_images = any(self._has_linear_gradient(src) for src in filenames)
+        use_gpu = self.gpu_processing.isChecked() and not has_masked_images
         kwargs["_auto_lens_correct_state"] = self.auto_lens_correct.isChecked()
 
         self.thread = QThread()
@@ -2966,9 +3590,17 @@ class MainWindow(QMainWindow):
             src, auto_lens_correct, kwargs.get("resolution")
         )
 
-        image = self.cpu_processor.process(
-            src, half_size=False, cache=False, **processing_args
-        )
+        if self._has_linear_gradient(src):
+            image = self._process_with_linear_gradients(
+                self.cpu_processor,
+                src,
+                {**processing_args, "half_size": False, "cache": False},
+                self._linear_gradients_for_image(src),
+            )
+        else:
+            image = self.cpu_processor.process(
+                src, half_size=False, cache=False, **processing_args
+            )
 
         return self._export_processed_image(
             image,
@@ -3220,6 +3852,10 @@ class MainWindow(QMainWindow):
             if self.profile_selector.findText(profile) == -1:
                 self.profile_selector.addItem(profile)
         self.sync_thumbnail_settings()
+        current_image = self.image_bar.current_image()
+        if current_image and self._has_linear_gradient(current_image):
+            self.load_image_params(current_image)
+            self.load_image(current_image)
 
     def _strip_internal_image_params(self, image_params):
         return {

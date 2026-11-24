@@ -17,7 +17,7 @@ from spectral_film_lut.utils import create_lut
 from wgpu import TextureUsage, get_default_device
 
 from raw2film import effects
-from raw2film.color_processing import apply_smart_saturation
+from raw2film.color_processing import apply_adaptive_blacks, apply_smart_saturation
 from raw2film.effects import (
     chroma_nr_filter,
     compute_halation_kernel,
@@ -731,6 +731,7 @@ class GpuProcessor:
         canvas_mode: CANVAS_MODES = "No",
         canvas_scale: float = 1.0,
         canvas_ratio: float = 1.0,
+        adaptive_blacks: float = 0.0,
     ):
         """Load the image, perform pre-processing and upload to GPU."""
         new_param_dict = {
@@ -752,6 +753,7 @@ class GpuProcessor:
             "canvas_mode": canvas_mode,
             "canvas_scale": canvas_scale,
             "canvas_ratio": canvas_ratio,
+            "adaptive_blacks": adaptive_blacks,
         }
         if new_param_dict == getattr(self, "image_param_dict", None):
             return
@@ -778,6 +780,7 @@ class GpuProcessor:
             canvas_mode,
             canvas_scale,
             canvas_ratio,
+            adaptive_blacks=adaptive_blacks,
         )
 
         # State updates and texture allocation
@@ -806,6 +809,7 @@ class GpuProcessor:
         canvas_mode="No",
         canvas_scale=1.0,
         canvas_ratio=1.0,
+        adaptive_blacks=0.0,
         **kwargs,
     ):
         """PHASE 1: Pure CPU Workload. Modifies NO instance states."""
@@ -843,6 +847,7 @@ class GpuProcessor:
                 resolution = [round(x * scale_factor) for x in resolution]
             image = resolution_scaling(image, resolution)
 
+        image = apply_adaptive_blacks(image, adaptive_blacks)
         output_res = tuple(round(x / scale_factor) for x in image.shape[:2])
         image = np.dstack((image, np.ones_like(image[..., :1])))
 
@@ -1763,6 +1768,7 @@ class GpuProcessor:
         cache: bool = True,
         color_masking: float | None = None,
         custom_inversion: bool = False,
+        adaptive_blacks: float = 0.0,
         **kwargs,
     ):
         """Main function to load and process an image."""
@@ -1787,6 +1793,7 @@ class GpuProcessor:
             canvas_mode,
             canvas_scale,
             canvas_ratio,
+            adaptive_blacks=adaptive_blacks,
         )
 
         # Capture locals and explicitly exclude internal state and the raw kwargs dict
@@ -1807,6 +1814,7 @@ class GpuProcessor:
             "canvas_mode",
             "canvas_scale",
             "canvas_ratio",
+            "adaptive_blacks",
             "chroma_nr",
             "half_size",
             "cache",
